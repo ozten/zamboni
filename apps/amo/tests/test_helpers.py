@@ -1,23 +1,33 @@
+# -*- coding: utf-8 -*-
 from datetime import datetime
 
 from django.conf import settings
+from django.utils import encoding
 
 import jingo
 from mock import Mock, patch
 from nose.tools import eq_, assert_almost_equal, assert_raises
-
 from pyquery import PyQuery
+from jinja2.exceptions import FilterArgumentError
 import test_utils
 
 import amo
-from amo import urlresolvers
-from amo.helpers import wround
+from amo import urlresolvers, utils, helpers
+from versions.models import License
 
 
 def render(s, context={}):
     t = jingo.env.from_string(s)
     return t.render(**context)
 
+
+def test_strip_html():
+    eq_('Hey Brother!', render('{{ "Hey <b>Brother!</b>"|strip_html }}'))
+
+
+def test_strip_html_none():
+    eq_('', render('{{ a|strip_html }}', {'a': None}))
+    eq_('', render('{{ a|strip_html(True) }}', {'a': None}))
 
 def test_strip_controls():
     """We want control codes like \x0c to disappear."""
@@ -40,6 +50,12 @@ def test_page_title():
     request.APP = None
     s = render('{{ page_title("%s") }}' % title, {'request': request})
     eq_(s, '%s :: Add-ons' % title)
+
+    # Check the dirty unicodes.
+    request.APP = amo.FIREFOX
+    s = render('{{ page_title(x) }}',
+               {'request': request,
+                'x': encoding.smart_str(u'\u05d0\u05d5\u05e1\u05e3')})
 
 
 def test_breadcrumbs():
@@ -97,7 +113,8 @@ def test_breadcrumbs():
 @patch('amo.helpers.urlresolvers.reverse')
 def test_url(mock_reverse):
     render('{{ url("viewname", 1, z=2) }}')
-    mock_reverse.assert_called_with('viewname', args=(1,), kwargs={'z': 2})
+    mock_reverse.assert_called_with('viewname', args=(1,), kwargs={'z': 2},
+                                    add_prefix=True)
 
 
 def test_urlparams():
@@ -140,15 +157,9 @@ def test_urlparams():
     eq_(s, url)
 
 
-def test_wround():
-    # Invalid input formats.
-    assert_raises(TypeError, wround, None)
-    assert_raises(TypeError, wround, 'yadayada')
-    assert_raises(TypeError, wround, '0')
-
-    # Integers as well as floats should work.
-    assert_almost_equal(wround(5, 2), 5)
-    assert_almost_equal(wround(5.001, 2), 5)
+def test_urlparams_unicode():
+    url = u'/xx?evil=reco\ufffd\ufffd\ufffd\u02f5'
+    utils.urlparams(url)
 
 
 def test_isotime():
@@ -191,22 +202,30 @@ def test_external_url():
         settings.REDIRECT_SECRET_KEY = secretkey
 
 
-def test_license_link():
-    expected = {
-        amo.LICENSE_MIT: (
-            '<ul class="license"><li class="text"><a href="http://www.'
-            'opensource.org/licenses/mit-license.php">MIT/X11 License</a>'
-            '</li></ul>'),
-        amo.LICENSE_COPYRIGHT: (
-            '<ul class="license"><li class="icon copyr"></li><li class="text">'
-            'All Rights Reserved</li></ul>'),
-        amo.LICENSE_CC_BY_NC_SA: (
-            '<ul class="license"><li class="icon cc-attrib"></li><li class='
-            '"icon cc-noncom"></li><li class="icon cc-share"></li><li class='
-            '"text"><a href="http://creativecommons.org/licenses/by-nc-sa/'
-            '3.0/" title="Creative Commons Attribution-Noncommercial-Share '
-            'Alike 3.0">Some rights reserved</a></li></ul>'),
-    }
-    for lic, ex in expected.items():
-        s = render('{{ license_link(lic) }}', {'lic': lic})
-        eq_(s, ex)
+class TestLicenseLink(test_utils.TestCase):
+
+    def test_license_link(self):
+        mit = License.objects.create(
+            name='MIT/X11 License', builtin=6, url='http://m.it')
+        copyright = License.objects.create(
+            name='All Rights Reserved', icons='copyr', builtin=7)
+        cc = License.objects.create(
+            name='Creative Commons', url='http://cre.at', builtin=8,
+            some_rights=True, icons='cc-attrib cc-noncom cc-share')
+        cc.save()
+        expected = {
+            mit: (
+                '<ul class="license"><li class="text">'
+                '<a href="http://m.it">MIT/X11 License</a></li></ul>'),
+            copyright: (
+                '<ul class="license"><li class="icon copyr"></li>'
+                '<li class="text">All Rights Reserved</li></ul>'),
+            cc: (
+                '<ul class="license"><li class="icon cc-attrib"></li>'
+                '<li class="icon cc-noncom"></li><li class="icon cc-share">'
+                '</li><li class="text"><a href="http://cre.at" '
+                'title="Creative Commons">Some rights reserved</a></li></ul>'),
+        }
+        for lic, ex in expected.items():
+            s = render('{{ license_link(lic) }}', {'lic': lic})
+            eq_(s, ex)

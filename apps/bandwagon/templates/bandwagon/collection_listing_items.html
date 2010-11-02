@@ -1,0 +1,41 @@
+{% for c in collections %}
+<div class="item">
+  <div class="item-info">
+    <ul>
+      <li>{{ barometer(c) }}</li>
+      <li class="followers">
+        {% if show_weekly %}
+          {% trans cnt=c.weekly_subscribers, num=c.weekly_subscribers|numberfmt %}
+            <span>{{ num }}</span> new follower
+          {% pluralize %}
+            <span>{{ num }}</span> new followers
+          {% endtrans %}
+        {% else %}
+          {# L10n: People "follow" collections to get notified of updates.
+                   Like Twitter followers. #}
+          {% trans cnt=c.subscribers, num=c.subscribers|numberfmt %}
+            <span>{{ num }}</span> follower
+          {% pluralize %}
+            <span>{{ num }}</span> followers
+          {% endtrans %}
+        {% endif %}
+      </li>
+      {% if show_date in ['created', 'newest'] %}
+        <li class="modified">
+          {# L10n: {0} is a date. #}
+          {{ _('Added {0}')|f(c.created|datetime) }}
+        </li>
+      {% endif %}
+    </ul>
+    {{ collection_widgets(c, condensed=True) }}
+  </div>
+  <h3>
+    <a href="{{ c.get_url_path() }}">
+      <img class="icon" src="{{ c.icon_url }}">
+      {{ c.name }}
+    </a>
+    <span>{{ _('by {0}')|f(c.author|user_link)|safe }}</span>
+  </h3>
+  <blockquote>{{ c.description }}</blockquote>
+</div>
+{% endfor %}

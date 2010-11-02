@@ -1,10 +1,11 @@
 <div>
-  <table class="{{ table_class }}" summary="{{ _('Developer Information') }}">
+  <table class="{{ table_class }}">
+    <caption>{{ _('Developer Information') }}</caption>
     <tbody>
       {# TODO msgctxt for table headers #}
       <tr>
         <th>{{ _('Name') }}</th>
-        <td class="fn n">{{ profile.display_name }}</td>
+        <td class="fn n">{{ profile.name }}</td>
       </tr>
       {% if profile.location %}
         <tr>

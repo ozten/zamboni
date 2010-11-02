@@ -1,5 +1,4 @@
 from django.db import models, connection
-import jinja2
 
 from bleach import Bleach
 import caching.base
@@ -56,6 +55,14 @@ class Translation(caching.base.CachingMixin, models.Model):
         else:
             return cmp(self.localized_string, other)
 
+    def clean(self):
+        if self.localized_string:
+            self.localized_string = self.localized_string.strip()
+
+    def save(self, **kwargs):
+        self.clean()
+        return super(Translation, self).save(**kwargs)
+
     @property
     def cache_key(self):
         return self._cache_key(self.id)
@@ -89,7 +96,6 @@ class Translation(caching.base.CachingMixin, models.Model):
         try:
             trans = cls.objects.get(**q)
             trans.localized_string = string
-            trans.save(force_update=True)
         except cls.DoesNotExist:
             trans = cls.objects.create(localized_string=string, **q)
 
@@ -111,14 +117,11 @@ class PurifiedTranslation(Translation):
         return unicode(self)
 
     def clean(self):
+        super(PurifiedTranslation, self).clean()
         self.localized_string_clean = bleach.bleach(self.localized_string)
 
-    def save(self, **kwargs):
-        self.clean()
-        return super(PurifiedTranslation, self).save(**kwargs)
-
     def __truncate__(self, length, killwords, end):
-        return utils.truncate(self.localized_string, length, killwords, end)
+        return utils.truncate(unicode(self), length, killwords, end)
 
 
 class LinkifiedTranslation(PurifiedTranslation):
@@ -142,3 +145,10 @@ class TranslationSequence(models.Model):
 
     class Meta:
         db_table = 'translations_seq'
+
+
+def delete_translation(obj, fieldname):
+    field = obj._meta.get_field(fieldname)
+    trans = getattr(obj, field.name)
+    obj.update(**{field.name:None})
+    Translation.objects.filter(id=trans.id).delete()

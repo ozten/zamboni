@@ -6,6 +6,8 @@ from django.db.models.sql import compiler
 
 from django.utils import translation as translation_utils
 
+import addons.query
+
 
 def order_by_translation(qs, fieldname):
     """
@@ -41,13 +43,16 @@ def order_by_translation(qs, fieldname):
     t2 = qs.query.join(connection, always_create=True, promote=True)
     qs.query.translation_aliases = {field: (t1, t2)}
 
+    f1, f2 = '%s.`localized_string`' % t1, '%s.`localized_string`' % t2
     name = 'translated_%s' % field.column
-    ifnull = 'IFNULL(%s.`localized_string`, %s.`localized_string`)' % (t1, t2)
+    ifnull = 'IFNULL(%s, %s)' % (f1, f2)
     prefix = '-' if desc else ''
-    return qs.extra(select={name: ifnull}, order_by=[prefix + name])
+    return qs.extra(select={name: ifnull},
+                    where=['(%s IS NOT NULL OR %s IS NOT NULL)' % (f1, f2)],
+                    order_by=[prefix + name])
 
 
-class TranslationQuery(models.query.sql.Query):
+class TranslationQuery(addons.query.IndexQuery):
     """
     Overrides sql.Query to hit our special compiler that knows how to JOIN
     translations.
@@ -65,7 +70,7 @@ class TranslationQuery(models.query.sql.Query):
         return SQLCompiler(self, c.connection, c.using)
 
 
-class SQLCompiler(compiler.SQLCompiler):
+class SQLCompiler(addons.query.IndexCompiler):
     """Overrides get_from_clause to LEFT JOIN translations with a locale."""
 
     def get_from_clause(self):

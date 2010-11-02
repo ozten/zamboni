@@ -1,5 +1,5 @@
+from django import test, shortcuts
 from django.conf import settings
-from django import test
 from django.core.urlresolvers import set_script_prefix
 
 from nose.tools import eq_, assert_not_equal
@@ -10,9 +10,7 @@ from amo.middleware import LocaleAndAppURLMiddleware
 
 
 class MiddlewareTest(test.TestCase):
-    """
-    Tests that the locale and app redirection work propperly
-    """
+    """Tests that the locale and app redirection work properly."""
 
     def setUp(self):
         self.rf = test_utils.RequestFactory()
@@ -49,16 +47,36 @@ class MiddlewareTest(test.TestCase):
         response = self.process('/services')
         assert response is None
 
-    def test_vary_locale(self):
+    def test_vary(self):
         response = self.process('/')
+        eq_(response['Vary'], 'Accept-Language, User-Agent')
+
+        response = self.process('/firefox')
         eq_(response['Vary'], 'Accept-Language')
 
         response = self.process('/en-US')
+        eq_(response['Vary'], 'User-Agent')
+
+        response = self.process('/en-US/thunderbird')
         assert 'Vary' not in response
 
     def test_no_redirect_with_script(self):
         response = self.process('/services', SCRIPT_NAME='/oremj')
         assert response is None
+
+    def test_get_app(self):
+        def check(url, expected, ua):
+            response = self.process(url, HTTP_USER_AGENT=ua)
+            eq_(response['Location'], expected)
+
+        check('/en-US/', '/en-US/firefox/', 'Firefox')
+        check('/de/', '/de/mobile/', 'Fennec')
+
+        # Mobile gets priority because it has both strings in its UA...
+        check('/de/', '/de/mobile/', 'Firefox Fennec')
+
+        # SeaMonkey gets priority because it has both strings in its UA...
+        check('/en-US/', '/en-US/seamonkey/', 'Firefox SeaMonkey')
 
     def test_get_lang(self):
         def check(url, expected):
@@ -142,6 +160,13 @@ class TestPrefixer:
         eq_(urlresolvers.reverse('home'), '/oremj/en-US/firefox/')
 
 
+def test_redirect():
+    """Make sure django.shortcuts.redirect uses our reverse."""
+    test.Client().get('/')
+    redirect = shortcuts.redirect('home')
+    eq_(redirect['Location'], '/en-US/firefox/')
+
+
 def test_outgoing_url():
     redirect_url = settings.REDIRECT_URL
     secretkey = settings.REDIRECT_SECRET_KEY
@@ -161,7 +186,7 @@ def test_outgoing_url():
         s2 = urlresolvers.get_outgoing_url(s)
         eq_(s, s2)
 
-        evil = settings.REDIRECT_URL.rstrip('/')+'.evildomain.com'
+        evil = settings.REDIRECT_URL.rstrip('/') + '.evildomain.com'
         s = urlresolvers.get_outgoing_url(evil)
         assert_not_equal(s, evil,
                          'No subdomain abuse of double-escaping protection.')
@@ -169,3 +194,24 @@ def test_outgoing_url():
     finally:
         settings.REDIRECT_URL = redirect_url
         settings.REDIRECT_SECRET_KEY = secretkey
+
+
+def test_outgoing_url_dirty_unicode():
+    bad = (u'http://chupakabr.ru/\u043f\u0440\u043e\u0435\u043a\u0442\u044b/'
+           u'\u043c\u0443\u0437\u044b\u043a\u0430-vkontakteru/')
+    urlresolvers.get_outgoing_url(bad)  # bug 564057
+
+
+def test_outgoing_url_query_params():
+    url = 'http://xx.com?q=1&v=2'
+    fixed = urlresolvers.get_outgoing_url(url)
+    assert fixed.endswith('http%3A//xx.com%3Fq=1&v=2'), fixed
+
+    url = 'http://xx.com?q=1&amp;v=2'
+    fixed = urlresolvers.get_outgoing_url(url)
+    assert fixed.endswith('http%3A//xx.com%3Fq=1&v=2'), fixed
+
+    # Check XSS vectors.
+    url = 'http://xx.com?q=1&amp;v=2" style="123"'
+    fixed = urlresolvers.get_outgoing_url(url)
+    assert fixed.endswith('%3A//xx.com%3Fq=1&v=2%22%20style=%22123%22'), fixed

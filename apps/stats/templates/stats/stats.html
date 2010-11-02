@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% set range = view.range %}
+
+{% block extrahead %}
+  <link rel="stylesheet" href="{{ MEDIA_URL }}css/stats.css"/>
+  <link rel="stylesheet"
+        href="{{ MEDIA_URL }}css/zamboni/jquery-ui/custom-1.7.2.css">
+{% endblock %}
+
+{% block title %}
+      {# L10n: {0} is an add-on name, {1} is an app name (like Firefox) #}
+      {{ _('{0} :: Statistics Dashboard :: Add-ons for {1}')|f(addon.name, request.APP.pretty) }}
+{% endblock %}
+
+{% block navbar %}
+  {{ breadcrumbs([(addon.type_url(), amo.ADDON_TYPES[addon.type]),
+                  (addon.get_url_path(), addon.name),
+                  (link, _('Statistics'))]) }}
+  {# TODO: Replace above line with this --> once we serve the extension home. { breadcrumbs([(addon.type.get_url_path(), amo.ADDON_TYPES[addon.type_id])]) } #}
+
+
+  {% set version = addon.current_version %}
+  {% set previews = addon.previews.all() %}
+
+  <div class="criteria range">
+    <ul>
+      <li>{{ _('For Last:') }}</li>
+      <li data-range="7 days"
+          {% if range=='7' %}class="selected"{% endif %}>
+          <a href="#">{{ _('7 Days') }}</a></li>
+      <li data-range="30 days"
+          {% if range=='30' %}class="selected"{% endif %}>
+          <a href="#">{{ _('30 Days') }}</a></li>
+      <li data-range="90 days"
+          {% if range=='90' %}class="selected"{% endif %}>
+          <a href="#">{{ _('90 Days') }}</a></li>
+      <li class="divider"></li>
+      <li data-range="custom"
+          {% if range=='custom' %}class="selected"{% endif %}>
+          <a href="#">{{ _('Custom') }}</a></li>
+    </ul>
+  </div>
+
+  <hgroup>
+  <h2 class="addon"{{ addon.name|locale_html }}>
+    <img src="{{ addon.icon_url }}" class="icon"/>
+    <span>
+      {# L10n: {0} is an add-on name #}
+      {{ _('Statistics for {0}')|f(addon.name) }}
+    </span>
+  </h2>
+  {# L10n: {0} is an add-on author #}
+  <h4 class="author">{{ _('by {0}')|f(users_list(addon.listed_authors))|safe }}</h4>
+  </hgroup>
+{% endblock %}
+
+{% block content %}
+  <div id="lm" class="loadmessage"><span>{{ _('Loading the latest data&hellip;') }}</span></div>
+  <div class="secondary">
+    {{ report_menu(addon, report) }}
+    <aside class="highlight">
+      {{ _('Notable Stats and tips will go here.') }}
+      <pre id="dbgout"></pre>
+    </aside>
+  </div>
+  <div class="primary statistics"
+    data-report="{{ report }}"
+    data-addon_id="{{ addon.id }}"
+    {% if view.last %}
+    data-range="{{ view.last }} days"
+    {% endif %}
+    {% if view.start and view.end %}
+    data-range="custom"
+    data-start_date="{{ view.start }}"
+    data-end_date="{{ view.end }}"
+    {% endif %}
+    data-base_url="{{ stats_base_url }}">
+    {% if true %}
+      <div class="custom criteria">
+        <form id="date-range-form">
+          <label for="date-range-start">{{ _('From') }}</label>
+          <input type="date" id="date-range-start" />
+          <label for="date-range-end">{{ _('To') }}</label>
+          <input type="date" id="date-range-end" />
+          <label for="date-range-grouping">{{ _('grouped by') }}</label>
+          <select id="date-range-grouping">
+            <option >{{ _('day') }}</option>
+            <option >{{ _('month') }}</option>
+            <option >{{ _('year') }}</option>
+          </select>
+          <button id="date-range-submit" type="submit">{{ _('Update') }}</button>
+        </form>
+      </div>
+    {% endif %}
+    <div class="featured">
+      <div class="featured-inner chart">
+        <div class="listing-header">
+          {% block chart_menu %}
+            <ul><li class="selected">&nbsp;</li></ul>
+          {% endblock %}
+        </div>
+        <div class="featured-body" id="head-chart" style="background:#fff;height:256px"
+          {% block chart_config %}
+          data-series="{{ series_fields }}"
+          {% endblock %}
+          >
+        </div>
+      </div>
+    </div>
+    {% block stats %}
+    {% endblock %}
+    {% block csvtable %}
+    {% endblock %}
+    <div class="hidden">
+      <div id="fieldMenuPopup" class="popup">
+        <form id="fieldMenu">
+          <ul id="fieldList">
+          </ul>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ MEDIA_URL }}js/zamboni/jquery-datepicker.js"></script>
+<script src="{{ MEDIA_URL }}js/zamboni/highcharts.src.js"></script>
+<!--[if IE]>
+   <script src="{{ MEDIA_URL }}js/excanvas.compiled.js" type="text/javascript"></script>
+<![endif]-->
+<script src="{{ MEDIA_URL }}js/zamboni/stats/csv_keys.js"></script>
+<script src="{{ MEDIA_URL }}js/zamboni/stats/helpers.js"></script>
+<script src="{{ MEDIA_URL }}js/zamboni/stats/stats_manager.js"></script>
+<script src="{{ MEDIA_URL }}js/zamboni/stats/stats_tables.js"></script>
+<script src="{{ MEDIA_URL }}js/zamboni/stats/stats.js"></script>
+{% endblock %}
+
+

@@ -9,7 +9,7 @@ import urllib
 
 from django.http import HttpResponse, HttpResponsePermanentRedirect
 from django.template.context import get_standard_processors
-from django.utils import translation
+from django.utils import translation, encoding
 
 import jingo
 from tower import ugettext as _, ugettext_lazy
@@ -57,6 +57,10 @@ def render_xml(request, template, context={}, **kwargs):
 
     template = xml_env.get_template(template)
     rendered = template.render(**context)
+
+    if 'mimetype' not in kwargs:
+        kwargs['mimetype'] = 'text/xml'
+
     return HttpResponse(rendered, **kwargs)
 
 
@@ -72,6 +76,65 @@ def validate_api_version(version):
         return False
 
     return True
+
+
+def addon_filter(addons, addon_type, limit, app, platform, version,
+                 shuffle=True):
+    """
+    Filter addons by type, application, app version, and platform.
+
+    Add-ons that support the current locale will be sorted to front of list.
+    Shuffling will be applied to the add-ons supporting the locale and the
+    others separately.
+
+    Doing this in the database takes too long, so we in code and wrap it in
+    generous caching.
+    """
+    APP = app
+
+    if addon_type.upper() != 'ALL':
+        try:
+            addon_type = int(addon_type)
+            if addon_type:
+                addons = [a for a in addons if a.type == addon_type]
+        except ValueError:
+            # `addon_type` is ALL or a type id.  Otherwise we ignore it.
+            pass
+
+    # Take out personas since they don't have versions.
+    groups = dict(partition(addons,
+                            lambda x: x.type == amo.ADDON_PERSONA))
+    personas, addons = groups.get(True, []), groups.get(False, [])
+
+    if platform != 'all' and platform in amo.PLATFORM_DICT:
+        pid = amo.PLATFORM_DICT[platform]
+        f = lambda ps: pid in ps or amo.PLATFORM_ALL in ps
+        addons = [a for a in addons
+                  if f(a.current_version.supported_platforms)]
+
+    if version is not None:
+        v = search_utils.convert_version(version)
+        f = lambda app: app.min.version_int <= v <= app.max.version_int
+        xs = [(a, a.compatible_apps) for a in addons]
+        addons = [a for a, apps in xs if apps.get(APP) and f(apps[APP])]
+
+    # Put personas back in.
+    addons.extend(personas)
+
+    # We prefer add-ons that support the current locale.
+    lang = translation.get_language()
+    partitioner = lambda x: (x.description and
+                             (x.description.locale == lang))
+    groups = dict(partition(addons, partitioner))
+    good, others = groups.get(True, []), groups.get(False, [])
+
+    if shuffle:
+        random.shuffle(good)
+        random.shuffle(others)
+
+    if len(good) < limit:
+        good.extend(others[:limit - len(good)])
+    return good
 
 
 class APIView(object):
@@ -115,7 +178,7 @@ class APIView(object):
             return HttpResponse(self.render_json(context),
                                 mimetype=self.mimetype)
 
-    def render_json(self, context):  # pragma: no cover
+    def render_json(self, context):
         return json.dumps({'msg': _('Not implemented yet.')})
 
 
@@ -206,61 +269,15 @@ class ListView(APIView):
             addons = qs.order_by('-average_daily_users')[:limit + BUFFER]
             shuffle = False  # By_adu is an ordered list.
         else:
-            addons = Addon.objects.featured(APP).distinct() & qs
+            addons = Addon.objects.featured(APP) & qs
 
-        args = (list_type, addon_type, limit, platform, version, shuffle)
+        args = (addon_type, limit, APP, platform, version, shuffle)
         f = lambda: self._process(addons, *args)
-        return cached_with(addons, f, self.request.path)
+        return cached_with(addons, f, map(encoding.smart_str, args))
 
-    def _process(self, addons, list_type, addon_type, limit, platform, version,
-                 shuffle=True):
-        """Do all the filtering in here so we can wrap it in cached_with."""
-        APP = self.request.APP
-
-        if addon_type.upper() != 'ALL':
-            try:
-                addon_type = int(addon_type)
-                if addon_type:
-                    addons = [a for a in addons if a.type_id == addon_type]
-            except ValueError:
-                # `addon_type` is ALL or a type id.  Otherwise we ignore it.
-                pass
-
-        # Take out personas since they don't have versions.
-        groups = dict(partition(addons,
-                                lambda x: x.type_id == amo.ADDON_PERSONA))
-        personas, addons = groups.get(True, []), groups.get(False, [])
-
-        if platform != 'all' and platform in amo.PLATFORM_DICT:
-            pid = amo.PLATFORM_DICT[platform]
-            f = lambda ps: pid in ps or amo.PLATFORM_ALL in ps
-            addons = [a for a in addons
-                      if f(a.current_version.supported_platforms)]
-
-        if version is not None:
-            v = search_utils.convert_version(version)
-            f = lambda app: app.min.version_int < v < app.max.version_int
-            xs = [(a, a.compatible_apps) for a in addons]
-            addons = [a for a, apps in xs if APP in apps and f(apps[APP])]
-
-        # Put personas back in.
-        addons.extend(personas)
-
-        # We prefer add-ons that support the current locale.
-        lang = translation.get_language()
-        partitioner = lambda x: (x.description and
-                                 (x.description.locale == lang))
-        groups = dict(partition(addons, partitioner))
-        good, others = groups.get(True, []), groups.get(False, [])
-
-        if shuffle:
-            random.shuffle(good)
-            random.shuffle(others)
-
-        if len(good) < limit:
-            good.extend(others[:limit - len(good)])
-
-        return self.render('api/list.xml', {'addons': good})
+    def _process(self, addons, *args):
+        return self.render('api/list.xml',
+                           {'addons': addon_filter(addons, *args)})
 
     def render_json(self, context):
         return json.dumps([addon_to_dict(a) for a in context['addons']],
@@ -277,3 +294,9 @@ def redirect_view(request, url):
     dest = get_url_prefix().fix(dest)
 
     return HttpResponsePermanentRedirect(dest)
+
+
+def request_token_ready(request, token):
+    error = request.GET.get('error', '')
+    ctx = {'error': error, 'token': token}
+    return jingo.render(request, 'piston/request_token_ready.html', ctx)

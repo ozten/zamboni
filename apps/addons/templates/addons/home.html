@@ -1,6 +1,8 @@
 {% extends "base_side_categories.html" %}
 
-{% block title %}{{ _('Add-ons for Firefox') }}{% endblock %}
+{% block title %}{{ _('Add-ons for {0}')|f(request.APP.pretty) }}{% endblock %}
+
+{% block bodyclass %}home{% endblock %}
 
 {% block site_stats %}
 {% if downloads and pings %}
@@ -27,26 +29,27 @@
 {% endif %}
 {% endblock %}
 
+{% set ext, extrss = url('browse.extensions'), url('browse.extensions.rss') %}
 {% set view_all = {
   'featured': {
     'text': _('View all featured add-ons'),
-    'link': '/recommended',
-    'feed': '/recommended/format:rss',
+    'link': url('browse.featured'),
+    'feed': url('browse.featured.rss'),
   },
   'popular': {
     'text': _('View all popular add-ons'),
-    'link': '/browse/type:1/cat:all?sort=popular',
-    'feed': '/browse/type:1/cat:all/format:rss?sort=popular',
+    'link': ext|urlparams(sort='popular'),
+    'feed': extrss|urlparams(sort='popular'),
   },
   'new': {
     'text': _('View all newly created add-ons'),
-    'link': '/browse/type:1/cat:all?sort=newest',
-    'feed': '/browse/type:1/cat:all/format:rss?sort=newest',
+    'link': ext|urlparams(sort='created'),
+    'feed': extrss|urlparams(sort='created'),
   },
   'updated': {
     'text': _('View all recently updated add-ons'),
-    'link': '/browse/type:1/cat:all?sort=updated',
-    'feed': '/browse/type:1/cat:all/format:rss?sort=updated',
+    'link': ext|urlparams(sort='updated'),
+    'feed': extrss|urlparams(sort='updated'),
   }
 }
 %}
@@ -78,14 +81,13 @@
       <div class="addon-listing addon-listing-{{ filter.field }}">
         {% for key, addons in addon_sets.items() %}
           <div id="list-{{ key }}">
-            {{ addon_listing_items_compact(addons, show_added_date=(key=='new'),
+            {{ addon_listing_items_compact(addons, show_date=key,
                                            src='homepagebrowse') }}
             <div class="listing-footer">
-              {# TODO: reverse URLs #}
-              <a class="subscribe" href="{{ remora_url(view_all[key]['feed']) }}">
+              <a class="subscribe" href="{{ view_all[key]['feed'] }}">
                 {{ _('Subscribe', 'addons_home_browse_subscribe') }}</a>
-              <a class="more-info" href="{{ remora_url(view_all[key]['link'])
-                }}">{{ view_all[key]['text'] }}</a>
+              <a class="more-info" href="{{ view_all[key]['link'] }}">
+                {{ view_all[key]['text'] }}</a>
             </div>
           </div> {# listing-{{ key }} #}
         {% endfor %}
@@ -97,12 +99,10 @@
 <div class="secondary collections-sidebar">
   <img alt="" width="100" height="125"
        src="{{ MEDIA_URL }}img/amo2009/illustrations/logo-collections-100x125.png">
-   {# TODO(jbalogh): reverse #}
-   <h3><a href="{{ remora_url('/collections') }}">{{ _('Collections', 'addons_home_collections') }}</a></h3>
+   <h3><a href="{{ url('collections.list') }}">{{ _('Collections', 'addons_home_collections') }}</a></h3>
    <p>
      {% trans %}
-     Collections are a way for you to categorize, mix, match and mingle add-ons.
-     Subscribe to collections created by other users or create your own.
+     Collections are groups of related add-ons that anyone can create and share.
      {% endtrans %}
    </p>
    <h4>{{ _('Popular Collections') }}</h4>
@@ -110,24 +110,21 @@
 </div>
 {% endblock content %}
 
-{% block js %}
-<script src="{{ MEDIA_URL }}js/zamboni/homepage.js"></script>
-{% endblock %}
-
 {% block under_categories %}
 {% cache top_tags %}
   {% if top_tags %}
   {% set max_tag_count = top_tags[0].popularity or 1 %}
+  {% set min_tag_count = (top_tags|last).popularity or 1 %}
   <div class="highlight" id="tag-box">
     <h3>{{ _('Popular Tags') }}</h3>
     <div>
       {% for tag in top_tags|list|shuffle if tag.tagstat %}
-        {{ tag_link(tag.tag_text, tag.tagstat.num_addons, max_tag_count) }}
+        {{ tag_link(tag, min_tag_count, max_tag_count)|safe }}
       {% endfor %}
     </div>
     <p class="more">
-      <a href="{{ remora_url('/tags/top', app='') }}" class="more-link">{{
-        _('View Top 100 Tags') }}</a>
+      <a href="{{ remora_url('/tags/top', app='') }}" class="more-link">
+        {{ _('View Top 100 Tags') }}</a>
     </p>
   </div>
   {% endif %}
@@ -136,21 +133,13 @@
 <div class="highlight">
   <h3>{{ _('Build a {0} Add-on')|f(request.APP.pretty) }}</h3>
   <p>{{ _('Find all the tools and resources you need to make your first add-on.') }}</p>
-  {# TODO(jbalogh): reverse #}
-  <p><strong><a href="/developers">{{ _('Visit the Developer Hub') }}</a></strong></p>
+  <p><strong><a href="{{ remora_url('/developers') }}">{{ _('Visit the Developer Hub') }}</a></strong></p>
 </div>
 {% endblock %}
-
-{% macro tag_link(tag_text, tag_count, max_count) -%}
-{% with factor=(tag_count/max_count*10)|wround(method='ceil') %}
-  <a class="tagLevel{{ factor }} tag" href="{{
-    remora_url('/tag/' + tag_text) }}">{{ tag_text }}</a>
-{% endwith %}
-{%- endmacro %}
 
 {% block extrahead %}
 {% for feed in view_all.itervalues() %}
   <link rel="alternate" type="application/rss+xml" title="{{ feed['text'] }}"
-        href="{{ remora_url(feed['feed']) }}"/>
+        href="{{ feed['feed'] }}">
 {% endfor %}
 {% endblock %}

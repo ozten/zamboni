@@ -5,6 +5,7 @@ from pyquery import PyQuery
 import test_utils
 
 import amo
+import amo.models
 from amo.urlresolvers import reverse
 from addons.buttons import install_button
 
@@ -13,17 +14,22 @@ def setup():
     jingo.load_helpers()
 
 
-class ButtonTest(object):
+class ButtonTest(test_utils.TestCase):
 
-    def setup(self):
+    def setUp(self):
         self.addon = Mock()
         self.addon.is_featured.return_value = False
         self.addon.is_category_featured.return_value = False
         self.addon.is_unreviewed.return_value = False
         self.addon.has_eula = False
+        self.addon.status = amo.STATUS_PUBLIC
+        self.addon.id = 2
+        self.addon.type = amo.ADDON_EXTENSION
 
         self.version = v = Mock()
         v.is_unreviewed = False
+        v.is_beta = False
+        v.version = 'v1'
         self.addon.current_version = v
 
         self.file = self.get_file(amo.PLATFORM_ALL)
@@ -32,9 +38,13 @@ class ButtonTest(object):
         self.platforms = amo.PLATFORM_MAC, amo.PLATFORM_LINUX
         self.platform_files = map(self.get_file, self.platforms)
 
-        self.request = test_utils.RequestFactory().get('/')
+        self.request = Mock()
+        self.request.APP = amo.FIREFOX
         # Make GET mutable.
-        self.request.GET = self.request.GET.copy()
+        self.request.GET = {}
+        user = self.request.user
+        user.get_and_delete_messages.__dict__['__name__'] = 'f'
+        user.is_authenticated.return_value = False
         self.context = {
             'APP': amo.FIREFOX,
             'LANG': 'en-US',
@@ -47,8 +57,8 @@ class ButtonTest(object):
         template_mock = Mock()
         t_mock.return_value = template_mock
         install_button(self.context, self.addon, **kwargs)
-        # Extract button from the *args from the first call.
-        return template_mock.render.call_args[0][0]['button']
+        # Extract button from the kwargs from the first call.
+        return template_mock.render.call_args[1]['button']
 
     def render(self, **kwargs):
         return PyQuery(install_button(self.context, self.addon, **kwargs))
@@ -83,7 +93,7 @@ class TestButtonSetup(ButtonTest):
         b = self.get_button(show_eula=False)
         assert b.show_eula
 
-        self.setup()
+        self.setUp()
         self.addon.has_eula = False
         b = self.get_button()
         assert not b.show_eula
@@ -136,6 +146,11 @@ class TestButtonSetup(ButtonTest):
         b = self.get_button(collection='ee')
         eq_(b.collection, 'ee')
 
+        c = Mock()
+        c.uuid = 'ff'
+        b = self.get_button(collection=c)
+        eq_(b.collection, 'ff')
+
 
 class TestButton(ButtonTest):
     """Tests for the InstallButton class."""
@@ -178,7 +193,7 @@ class TestButton(ButtonTest):
         b = self.get_button(show_warning=False)
         assert not b.show_warning
 
-        self.setup()
+        self.setUp()
         self.addon.status = amo.STATUS_LISTED
         b = self.get_button()
         assert b.show_warning
@@ -222,6 +237,17 @@ class TestButton(ButtonTest):
         eq_(b.install_class, ['unreviewed'])
         eq_(b.install_text, 'Not Reviewed')
 
+    def test_beta(self):
+        # Throw featured in there to make sure it's ignored.
+        self.addon.is_featured.return_value = True
+        self.version.is_beta = True
+        b = self.get_button()
+        assert not b.featured
+        assert b.is_beta
+        eq_(b.button_class, ['download', 'caution'])
+        eq_(b.install_class, ['unreviewed', 'beta'])
+        eq_(b.install_text, 'Not Reviewed')
+
     def test_self_hosted(self):
         # Throw featured in there to make sure it's ignored.
         self.addon.is_featured.return_value = True
@@ -245,7 +271,7 @@ class TestButton(ButtonTest):
 
         self.addon.takes_contributions = True
         self.addon.annoying = amo.CONTRIB_AFTER
-        self.addon.type_id = amo.ADDON_SEARCH
+        self.addon.type = amo.ADDON_SEARCH
 
         b = self.get_button()
         eq_(b.attrs(), {'data-after': 'contrib', 'data-search': 'true'})
@@ -274,15 +300,24 @@ class TestButton(ButtonTest):
         # EULA roadblock.
         b.show_eula = True
         text, url, _ = b.file_details(file)
-        eq_(text, 'Continue to Download &rarr;')
+        eq_(text, 'Continue to Download&nbsp;&rarr;')
         eq_(url, 'eula.url')
 
         # Contribution roadblock.
         b.show_eula = False
         b.show_contrib = True
         text, url, _ = b.file_details(file)
-        eq_(text, 'Continue to Download &rarr;')
-        eq_(url, 'meet.dev?eula=')
+        eq_(text, 'Continue to Download&nbsp;&rarr;')
+        eq_(url,
+            '/en-US/firefox/addon/2/contribute/roadblock/?eula=&version=v1')
+
+    def test_file_details_unreviewed(self):
+        file = self.get_file(amo.PLATFORM_ALL)
+        file.status = amo.STATUS_UNREVIEWED
+        b = self.get_button()
+
+        _, url, _ = b.file_details(file)
+        eq_(url, 'xpi.url')
 
     def test_fix_link(self):
         b = self.get_button()
@@ -291,10 +326,12 @@ class TestButton(ButtonTest):
         b = self.get_button(src='src')
         eq_(b.fix_link('foo.com'), 'foo.com?src=src')
 
-        b = self.get_button(collection='xxx')
+        collection = Mock()
+        collection.uuid = 'xxx'
+        b = self.get_button(collection=collection)
         eq_(b.fix_link('foo.com'), 'foo.com?collection=xxx')
 
-        b = self.get_button(collection='xxx', src='src')
+        b = self.get_button(collection=collection, src='src')
         eq_(b.fix_link('foo.com'), 'foo.com?src=src&collection=xxx')
 
     def test_links(self):
@@ -356,15 +393,15 @@ class TestButtonHtml(ButtonTest):
         eq_('Featured', doc('.install strong:last-child').text())
 
     def test_unreviewed(self):
+        self.addon.status = amo.STATUS_UNREVIEWED
         self.addon.is_unreviewed.return_value = True
         self.addon.get_url_path.return_value = 'addon.url'
         button = self.render()('.button.caution')
         eq_('addon.url', button.attr('href'))
-        eq_('xpi.latest', button.attr('data-realurl'))
+        eq_('xpi.url', button.attr('data-realurl'))
 
     def test_multi_platform(self):
         self.version.all_files = self.platform_files
-        names = [p.name for p in self.platforms]
         doc = self.render()
         eq_(doc('.button').length, 2)
 
@@ -376,7 +413,7 @@ class TestButtonHtml(ButtonTest):
         compat = Mock()
         compat.min.version = 'min version'
         compat.max.version = 'max version'
-        self.addon.compatible_apps = {amo.FIREFOX: compat}
+        self.version.compatible_apps = {amo.FIREFOX: compat}
         install = self.render()('.install')
         eq_('min version', install.attr('data-min'))
         eq_('max version', install.attr('data-max'))
@@ -407,7 +444,7 @@ class TestButtonHtml(ButtonTest):
 
 
 class TestViews(test_utils.TestCase):
-    fixtures = ['addons/eula+contrib-addon']
+    fixtures = ['addons/eula+contrib-addon', 'base/apps']
 
     def test_eula_with_contrib_roadblock(self):
         url = reverse('addons.eula', args=[11730, 53612])

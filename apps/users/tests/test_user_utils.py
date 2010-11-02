@@ -1,11 +1,13 @@
+
 from django import test
 
+import test_utils
 from nose.tools import eq_
 
 from users.utils import EmailResetCode
 
 
-class TestEmailResetCode(test.TestCase):
+class TestEmailResetCode(test_utils.TestCase):
 
     def test_parse(self):
         id = 1

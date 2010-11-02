@@ -17,7 +17,7 @@ class Application(amo.models.ModelBase):
         db_table = 'applications'
 
     def __unicode__(self):
-        return unicode(amo.APP_IDS[self.id].pretty)
+        return unicode(amo.APPS_ALL[self.id].pretty)
 
 
 class AppVersion(amo.models.ModelBase):
@@ -30,6 +30,11 @@ class AppVersion(amo.models.ModelBase):
         db_table = 'appversions'
         ordering = ['-version_int']
 
+    def save(self, *args, **kw):
+        if not self.version_int:
+            self.version_int = compare.version_int(self.version)
+        return super(AppVersion, self).save(*args, **kw)
+
     def __init__(self, *args, **kwargs):
         super(AppVersion, self).__init__(*args, **kwargs)
         # Add all the major, minor, ..., version attributes to the object.
@@ -37,3 +42,6 @@ class AppVersion(amo.models.ModelBase):
 
     def __unicode__(self):
         return self.version
+
+    def flush_urls(self):
+        return ['*/pages/appversions/*']

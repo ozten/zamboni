@@ -1,8 +1,9 @@
 from django.conf import settings
 from django.conf.urls.defaults import patterns, url, include
 
-from . import views
+from piston.resource import Resource
 
+from api import authentication, handlers, views
 
 API_CACHE_TIMEOUT = getattr(settings, 'API_CACHE_TIMEOUT', 500)
 
@@ -60,9 +61,31 @@ for regexp in list_regexps:
     api_patterns += patterns('',
             url(regexp + '/?$', class_view(views.ListView), name='api.list'))
 
+ad = dict(authentication=authentication.AMOOAuthAuthentication())
+user_resource = Resource(handler=handlers.UserHandler, **ad)
+addons_resource = Resource(handler=handlers.AddonsHandler, **ad)
+version_resource = Resource(handler=handlers.VersionsHandler, **ad)
+compatibility_resource = Resource(
+        handler=handlers.ApplicationsVersionsHandler, **ad)
+
+piston_patterns = patterns('',
+    url(r'^user/$', user_resource, name='api.user'),
+    url(r'^addons/$', addons_resource, name='api.addons'),
+    url(r'^addon/(?P<addon_id>\d+)$', addons_resource, name='api.addon'),
+    url(r'^addon/(?P<addon_id>\d+)/versions$', version_resource,
+        name='api.versions'),
+    url(r'^addon/(?P<addon_id>\d+)/version/(?P<version_id>\d+)$',
+        version_resource, name='api.version'),
+    url(r'^addon/(?P<addon_id>\d+)/version/(?P<version_id>\d+)/compatibility$',
+        compatibility_resource, name='api.compatibility'),
+)
+
 urlpatterns = patterns('',
     # Redirect api requests without versions
     url('^((?:addon|search|list)/.*)$', views.redirect_view),
+
+    # Piston
+    url(r'^2/', include(piston_patterns)),
 
     # Append api_version to the real api views
     url(r'^(?P<api_version>\d+|\d+.\d+)/', include(api_patterns)),

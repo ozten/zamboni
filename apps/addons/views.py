@@ -1,31 +1,47 @@
-from django import http
-from django.db.models import Q
-from django.shortcuts import get_object_or_404
-from django.utils import translation
+import hashlib
+import uuid
 
+from django import http
+from django.conf import settings
+from django.db.models import Q
+from django.shortcuts import get_object_or_404, redirect
+from django.utils.translation import trans_real as translation
+from django.utils import http as urllib
+
+import caching.base as caching
 import jingo
 from tower import ugettext_lazy as _lazy
+from tower import ugettext as _
 
 import amo
-from amo.utils import sorted_groupby
+from amo.utils import sorted_groupby, randslice
+from amo.helpers import absolutify
 from amo import urlresolvers
 from amo.urlresolvers import reverse
 from bandwagon.models import Collection, CollectionFeature, CollectionPromo
-from users.models import UserProfile
-from stats.models import GlobalStat
+from reviews.forms import ReviewForm
+from reviews.models import Review
+from sharing.views import share as share_redirect
+from stats.models import GlobalStat, Contribution
 from tags.models import Tag
+from translations.query import order_by_translation
+from translations.helpers import truncate
+from versions.models import Version
 from .models import Addon
 
 
 def author_addon_clicked(f):
     """Decorator redirecting clicks on "Other add-ons by author"."""
     def decorated(request, *args, **kwargs):
+        redirect_id = request.GET.get('addons-author-addons-select', None)
+        if not redirect_id:
+            return f(request, *args, **kwargs)
         try:
-            target_id = int(request.GET.get('addons-author-addons-select'))
+            target_id = int(redirect_id)
             return http.HttpResponsePermanentRedirect(reverse(
                 'addons.detail', args=[target_id]))
-        except TypeError:
-            return f(request, *args, **kwargs)
+        except ValueError:
+            return http.HttpResponseBadRequest('Invalid add-on ID.')
     return decorated
 
 
@@ -33,19 +49,24 @@ def author_addon_clicked(f):
 def addon_detail(request, addon_id):
     """Add-ons details page dispatcher."""
     addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
+
+    if settings.SANDBOX_PANIC and addon.status in amo.UNREVIEWED_STATUSES:
+        raise http.Http404
+
     # addon needs to have a version and be valid for this app.
-    if addon.type_id in request.APP.types:
-        if addon.type_id == amo.ADDON_PERSONA:
+    if addon.type in request.APP.types:
+        if addon.type == amo.ADDON_PERSONA:
             return persona_detail(request, addon)
         else:
             if not addon.current_version:
                 raise http.Http404
+
             return extension_detail(request, addon)
     else:
         # Redirect to an app that supports this type.
         try:
-            new_app = [ a for a in amo.APP_USAGE if
-                        addon.type_id in a.types ][0]
+            new_app = [a for a in amo.APP_USAGE if addon.type
+                       in a.types][0]
         except IndexError:
             raise http.Http404
         else:
@@ -75,40 +96,24 @@ def extension_detail(request, addon):
                               addon.get_satisfaction_company)
 
     # other add-ons from the same author(s)
-    author_addons = Addon.objects.valid().filter(
-        addonuser__listed=True, authors__in=addon.listed_authors).distinct()
-
-    # Remove this addon via list comprehension so we can use the above cached
-    # query on other addons.
-    author_addons = [a for a in author_addons if a.id != addon.id]
+    author_addons = order_by_translation(addon.authors_other_addons, 'name')
 
     # tags
-    (dev_tags, user_tags) = addon.tags_partitioned_by_developer
+    dev_tags, user_tags = addon.tags_partitioned_by_developer
 
     current_user_tags = []
 
     if request.user.is_authenticated():
         current_user_tags = user_tags.filter(
-                addon_tags__user = request.amo_user)
+                addon_tags__user=request.amo_user)
 
     # addon recommendations
-    recommended = Addon.objects.valid().filter(
+    recommended = Addon.objects.valid().only_translations().filter(
         recommended_for__addon=addon)[:5]
 
     # popular collections this addon is part of
-    coll_show_count = 3
     collections = Collection.objects.listed().filter(
         addons=addon, application__id=request.APP.id)
-    other_coll_count = max(0, collections.count() - coll_show_count)
-    popular_coll = collections.order_by('-subscribers')[:coll_show_count]
-
-    # this user's collections
-    if request.user.is_authenticated():
-        profile = UserProfile.objects.get(user=request.user)
-        user_collections = _details_collections_dropdown(request,
-                                                        profile, addon)
-    else:
-        user_collections = []
 
     data = {
         'addon': addon,
@@ -121,60 +126,19 @@ def extension_detail(request, addon):
         'current_user_tags': current_user_tags,
 
         'recommendations': recommended,
+        'review_form': ReviewForm(),
+        'reviews': Review.objects.latest().filter(addon=addon),
+        'get_replies': Review.get_replies,
 
-        'collections': popular_coll,
-        'other_collection_count': other_coll_count,
-        'user_collections': user_collections,
+        'collections': collections.order_by('-subscribers')[:3],
     }
     return jingo.render(request, 'addons/details.html', data)
 
 
-def _details_collections_dropdown(request, profile, addon):
-    """Returns the collections which should be shown on an add-on details
-        page for a logged in user. This is used in the "Add to a collection..."
-        dropdown.  Rules to be in this list:
-            - user is logged in
-            - collection is not synchronized
-            - user is an admin or publisher of the collection
-            - collection application matches current APP
-            - current add-on is not already in the collection
-
-    This takes care of all but #5, for that we had to resort to raw() :(
-        profile.collections.filter(
-            Q(type=amo.COLLECTION_NORMAL) | Q(type=amo.COLLECTION_FEATURED),
-            Q(collectionuser__role=amo.COLLECTION_ROLE_ADMIN) |
-            Q(collectionuser__role=amo.COLLECTION_ROLE_PUBLISHER),
-            application__id=request.APP.id)
-    """
-
-    sql = """
-            SELECT DISTINCT
-                collections.id
-            FROM
-                collections_users as cu
-            INNER JOIN
-                collections ON
-                (cu.collection_id = collections.id)
-            LEFT JOIN
-                addons_collections AS ac ON
-                (ac.collection_id = collections.id AND ac.addon_id IN (%s))
-            WHERE
-                cu.user_id = %s
-            AND cu.role IN (%s,%s) AND ac.addon_id IS NULL
-            AND collections.collection_type IN (%s,%s)
-            AND collections.application_id = %s
-    """
-    params = [addon.id, profile.id, amo.COLLECTION_ROLE_PUBLISHER,
-              amo.COLLECTION_ROLE_ADMIN, amo.COLLECTION_NORMAL,
-              amo.COLLECTION_FEATURED, request.APP.id]
-    collections = Collection.objects.raw(sql, params)
-
-    ids = [i.id for i in collections]
-
-    if ids:
-        return Collection.objects.filter(id__in=ids)
-    else:
-        return []
+def _category_personas(qs, limit):
+    f = lambda: randslice(qs, limit=limit)
+    key = 'cat-personas:' + qs.query_key()
+    return caching.cached(f, key)
 
 
 def persona_detail(request, addon):
@@ -184,24 +148,19 @@ def persona_detail(request, addon):
     # this persona's categories
     categories = addon.categories.filter(application=request.APP.id)
     if categories:
-        category_personas = Addon.objects.valid().filter(
-            categories=categories[0]).exclude(pk=addon.pk).order_by('?')[:6]
+        qs = Addon.objects.valid().filter(categories=categories[0])
+        category_personas = _category_personas(qs, limit=6)
     else:
         category_personas = None
 
     # tags
-    tags = addon.tags.not_blacklisted()
-    dev_tags = tags.filter(addon_tags__user__in=addon.authors.all())
-    user_tags = tags.exclude(addon_tags__user__in=addon.authors.all())
+    dev_tags, user_tags = addon.tags_partitioned_by_developer
 
     # other personas from the same author(s)
-    other_personas_regular = Q(addonuser__listed=True,
-                               authors__in=addon.listed_authors)
-    other_personas_legacy = Q(persona__author=persona.author)
     author_personas = Addon.objects.valid().filter(
-        other_personas_regular | other_personas_legacy,
+        persona__author=persona.author,
         type=amo.ADDON_PERSONA).exclude(
-            pk=addon.pk).distinct().select_related('persona')[:3]
+            pk=addon.pk).select_related('persona')[:3]
 
     data = {
         'addon': addon,
@@ -211,31 +170,40 @@ def persona_detail(request, addon):
         'category_personas': category_personas,
         'dev_tags': dev_tags,
         'user_tags': user_tags,
+        'review_form': ReviewForm(),
+        'reviews': Review.objects.latest().filter(addon=addon),
+        'get_replies': Review.get_replies,
+        # Remora users persona.author despite there being a display_username
+        'author_gallery': settings.PERSONAS_USER_ROOT % persona.author,
+        'search_cat': 'personas',
     }
 
     return jingo.render(request, 'addons/personas_detail.html', data)
 
 
-class HomepageFilter(object):
+class BaseFilter(object):
     """
-    key: the GET param we look at
-    default: the default key we should use
-    """
+    Filters help generate querysets for add-on listings.
 
-    opts = (('featured', _lazy('Featured')),
-            ('popular', _lazy('Popular')),
-            ('new', _lazy('Recently Added')),
-            ('updated', _lazy('Recently Updated')))
+    You have to define ``opts`` on the subclass as a sequence of (key, title)
+    pairs.  The key is used in GET parameters and the title can be used in the
+    view.
+
+    The chosen filter field is combined with the ``base`` queryset using
+    the ``key`` found in request.GET.  ``default`` should be a key in ``opts``
+    that's used if nothing good is found in request.GET.
+    """
 
     def __init__(self, request, base, key, default):
         self.opts_dict = dict(self.opts)
         self.request = request
         self.base_queryset = base
+        self.key = key
         self.field, self.title = self.options(self.request, key, default)
         self.qs = self.filter(self.field)
 
     def options(self, request, key, default):
-        """Get the (option, title) pair we should according to the request."""
+        """Get the (option, title) pair we want according to the request."""
         if key in request.GET and request.GET[key] in self.opts_dict:
             opt = request.GET[key]
         else:
@@ -248,19 +216,42 @@ class HomepageFilter(object):
 
     def filter(self, field):
         """Get the queryset for the given field."""
-        return self.base_queryset.distinct() & self._filter(field).distinct()
+        return self._filter(field) & self.base_queryset
 
     def _filter(self, field):
-        qs = Addon.objects
-        if field == 'popular':
-            return qs.order_by('-bayesian_rating')
-        elif field == 'new':
-            return qs.order_by('-created')
-        elif field == 'updated':
-            return qs.order_by('-last_updated')
-        else:
-            # It's ok to cache this for a while...it'll expire eventually.
-            return qs.featured(self.request.APP).order_by('?')
+        return getattr(self, 'filter_%s' % field)()
+
+    def filter_popular(self):
+        return (Addon.objects.order_by('-weekly_downloads')
+                .with_index(addons='downloads_type_idx'))
+
+    def filter_created(self):
+        return (Addon.objects.order_by('-created')
+                .with_index(addons='created_type_idx'))
+
+    def filter_updated(self):
+        return (Addon.objects.order_by('-last_updated')
+                .with_index(addons='last_updated_type_idx'))
+
+    def filter_rating(self):
+        return (Addon.objects.order_by('-bayesian_rating')
+                .with_index(addons='rating_type_idx'))
+
+    def filter_name(self):
+        return order_by_translation(Addon.objects.all(), 'name')
+
+
+class HomepageFilter(BaseFilter):
+    opts = (('featured', _lazy('Featured')),
+            ('popular', _lazy('Popular')),
+            ('new', _lazy('Recently Added')),
+            ('updated', _lazy('Recently Updated')))
+
+    filter_new = BaseFilter.filter_created
+
+    def filter_featured(self):
+        # It's ok to cache this for a while...it'll expire eventually.
+        return Addon.objects.featured(self.request.APP).order_by('?')
 
 
 def home(request):
@@ -304,7 +295,7 @@ class CollectionPromoBox(object):
 
     def collections(self):
         features = self.features()
-        lang = translation.get_language()
+        lang = translation.to_language(translation.get_language())
         locale = Q(locale='') | Q(locale=lang)
         promos = (CollectionPromo.objects.filter(locale)
                   .filter(collection_feature__in=features)
@@ -314,9 +305,9 @@ class CollectionPromoBox(object):
         # We key by feature_id and locale, so we can favor locale specific
         # promos.
         promo_dict = {}
-        for k, v in groups:
+        for feature_id, v in groups:
             promo = v.next()
-            key = (k, promo.locale)
+            key = (feature_id, translation.to_language(promo.locale))
             promo_dict[key] = promo
 
         rv = {}
@@ -325,6 +316,8 @@ class CollectionPromoBox(object):
             key = (feature.id, lang)
             if key not in promo_dict:
                 key = (feature.id, '')
+                if key not in promo_dict:
+                    continue
 
             # We only want to see public add-ons on the front page.
             c = promo_dict[key].collection
@@ -337,12 +330,150 @@ class CollectionPromoBox(object):
         return self.request.APP == amo.FIREFOX
 
 
-def eula(request, addon_id, file_id):
+def eula(request, addon_id, file_id=None):
     addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
-    return jingo.render(request, 'addons/eula.html', {'addon': addon})
+    # redirect back to detail if no eula
+    # Todo(skeen): think of a better solution
+    if not addon.eula:
+        return http.HttpResponseRedirect(addon.get_url_path())
+    if file_id is not None:
+        version = get_object_or_404(addon.versions, files__id=file_id)
+    else:
+        version = addon.current_version
+
+    return jingo.render(request, 'addons/eula.html',
+                        {'addon': addon, 'version': version})
 
 
-def meet_the_developer(request, addon_id, extra=None):
+def privacy(request, addon_id):
     addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
-    return jingo.render(request, 'addons/meet_the_developer.html',
-                        {'addon': addon})
+    if not addon.privacy_policy:
+        return http.HttpResponseRedirect(addon.get_url_path())
+
+    return jingo.render(request, 'addons/privacy.html', {'addon': addon})
+
+
+def developers(request, addon_id, page):
+    addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
+    if 'version' in request.GET:
+        version = get_object_or_404(addon.versions,
+                                    version=request.GET['version'])
+    else:
+        version = addon.current_version
+    if addon.is_persona():
+        raise http.Http404()
+    author_addons = order_by_translation(addon.authors_other_addons, 'name')
+    return jingo.render(request, 'addons/developers.html',
+                        {'addon': addon, 'author_addons': author_addons,
+                         'page': page, 'version': version})
+
+
+def contribute(request, addon_id):
+    addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
+
+    contrib_type = request.GET.get('type', '')
+    is_suggested = contrib_type == 'suggested'
+    source = request.GET.get('source', '')
+    comment = request.GET.get('comment', '')
+
+    amount = {
+        'suggested': addon.suggested_amount,
+        'onetime': request.GET.get('onetime-amount', ''),
+        'monthly': request.GET.get('monthly-amount', '')}.get(contrib_type, '')
+
+    contribution_uuid = hashlib.md5(str(uuid.uuid4())).hexdigest()
+
+    contrib = Contribution(addon_id=addon.id,
+                           amount=amount,
+                           source=source,
+                           source_locale=request.LANG,
+                           annoying=addon.annoying,
+                           uuid=str(contribution_uuid),
+                           is_suggested=is_suggested,
+                           suggested_amount=addon.suggested_amount,
+                           comment=comment)
+    contrib.save()
+
+    return_url = "%s?%s" % (reverse('addons.thanks', args=[addon.id]),
+                            urllib.urlencode({'uuid': contribution_uuid}))
+    # L10n: {0} is an add-on name.
+    contrib_for = _(u'Contribution for {0}').format(addon.name)
+    redirect_url_params = contribute_url_params(
+                            addon.paypal_id,
+                            addon.id,
+                            contrib_for,
+                            absolutify(return_url),
+                            amount,
+                            contribution_uuid,
+                            contrib_type == 'monthly',
+                            comment)
+
+    return http.HttpResponseRedirect(settings.PAYPAL_CGI_URL
+                                     + '?'
+                                     + urllib.urlencode(redirect_url_params))
+
+
+def contribute_url_params(business, addon_id, item_name, return_url,
+                          amount='', item_number='',
+                          monthly=False, comment=''):
+
+    lang = translation.get_language()
+    try:
+        paypal_lang = settings.PAYPAL_COUNTRYMAP[lang]
+    except KeyError:
+        lang = lang.split('-')[0]
+        paypal_lang = settings.PAYPAL_COUNTRYMAP.get(lang, 'US')
+
+    # Get all the data elements that will be URL params
+    # on the Paypal redirect URL.
+    data = {'business': business,
+            'item_name': item_name,
+            'item_number': item_number,
+            'bn': settings.PAYPAL_BN + '-AddonID' + str(addon_id),
+            'no_shipping': '1',
+            'return': return_url,
+            'charset': 'utf-8',
+            'lc': paypal_lang,
+            'notify_url': "%s%s" % (settings.SERVICES_URL,
+                                    reverse('amo.paypal'))}
+
+    if not monthly:
+        data['cmd'] = '_donations'
+        if amount:
+            data['amount'] = amount
+    else:
+        data.update({
+            'cmd': '_xclick-subscriptions',
+            'p3': '12',  # duration: for 12 months
+            't3': 'M',  # time unit, 'M' for month
+            'a3': amount,  # recurring contribution amount
+            'no_note': '1'})  # required: no "note" text field for user
+
+    if comment:
+        data['custom'] = comment
+
+    return data
+
+
+def share(request, addon_id):
+    """Add-on sharing"""
+    addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
+    return share_redirect(request, addon, name=addon.name,
+                          description=truncate(addon.summary, length=250))
+
+
+def license(request, addon_id, version=None):
+    addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
+    if version is not None:
+        version = get_object_or_404(addon.versions, version=version)
+    else:
+        version = addon.current_version
+    if not (version and version.license):
+        raise http.Http404()
+    return jingo.render(request, 'addons/license.html',
+                        dict(addon=addon, version=version))
+
+
+def license_redirect(request, version):
+    version = get_object_or_404(Version, pk=version)
+    return redirect(version.license_url(), permanent=True)

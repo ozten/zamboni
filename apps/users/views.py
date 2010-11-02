@@ -1,29 +1,38 @@
-import logging
-import random
-import string
 from django import http
 from django.conf import settings
 from django.core.mail import send_mail
-from django.core.urlresolvers import reverse
 from django.shortcuts import get_object_or_404
 from django.contrib import auth
-from django.contrib.auth.decorators import login_required
-from django.contrib import messages
 from django.template import Context, loader
 
+import commonware.log
+import jingo
 from tower import ugettext as _
 
-import jingo
 
 import amo
+from amo import messages
+from amo.decorators import login_required, json_view, write
+from amo.urlresolvers import reverse
+from access import acl
 from bandwagon.models import Collection
 
 from .models import UserProfile
 from .signals import logged_out
 from .users import forms
-from users.utils import EmailResetCode
+from .utils import EmailResetCode
+import tasks
 
-log = logging.getLogger('z.users')
+log = commonware.log.getLogger('z.users')
+
+
+@login_required(redirect=False)
+@json_view
+def ajax(request):
+    """Query for a user matching a given email."""
+    email = request.GET.get('q', '').strip()
+    u = get_object_or_404(UserProfile, email=email)
+    return dict(id=u.id, name=u.name)
 
 
 def confirm(request, user_id, token):
@@ -35,14 +44,22 @@ def confirm(request, user_id, token):
     if user.confirmationcode != token:
         log.info(u"Account confirmation failed for user (%s)", user)
         messages.error(request, _('Invalid confirmation code!'))
-        return http.HttpResponseRedirect(reverse('users.login'))
+
+
+        amo.utils.clear_messages(request)
+        return http.HttpResponseRedirect(reverse('users.login') + '?m=5')
+        # TODO POSTREMORA Replace the above with this line when remora goes away
+        #return http.HttpResponseRedirect(reverse('users.login'))
 
     user.confirmationcode = ''
     user.save()
     messages.success(request, _('Successfully verified!'))
     log.info(u"Account confirmed for user (%s)", user)
 
-    return http.HttpResponseRedirect(reverse('users.login'))
+    amo.utils.clear_messages(request)
+    return http.HttpResponseRedirect(reverse('users.login') + '?m=4')
+    # TODO POSTREMORA Replace the above with this line when remora goes away
+    #return http.HttpResponseRedirect(reverse('users.login'))
 
 
 def confirm_resend(request, user_id):
@@ -68,7 +85,7 @@ def confirm_resend(request, user_id):
 
 @login_required
 def delete(request):
-    amouser = request.user.get_profile()
+    amouser = request.amo_user
     if request.method == 'POST':
         form = forms.UserDeleteForm(request.POST, request=request)
         if form.is_valid():
@@ -85,13 +102,30 @@ def delete(request):
 
 
 @login_required
+def delete_photo(request):
+    u = request.amo_user
+
+    if request.method == 'POST':
+        u.picture_type = ''
+        u.save()
+        log.debug(u"User (%s) deleted photo" % u)
+        tasks.delete_photo.delay(u.picture_path)
+        messages.success(request, _('Photo Deleted'))
+        return http.HttpResponseRedirect(reverse('users.edit') +
+                                         '#user-profile')
+
+    return jingo.render(request, 'users/delete_photo.html', dict(user=u))
+
+
+@write
+@login_required
 def edit(request):
     amouser = request.user.get_profile()
     if request.method == 'POST':
         # ModelForm alters the instance you pass in.  We need to keep a copy
         # around in case we need to use it below (to email the user)
         original_email = amouser.email
-        form = forms.UserEditForm(request.POST, request=request,
+        form = forms.UserEditForm(request.POST, request.FILES, request=request,
                                   instance=amouser)
         if form.is_valid():
             messages.success(request, _('Profile Updated'))
@@ -124,6 +158,7 @@ def edit(request):
             form.save()
             return http.HttpResponseRedirect(reverse('users.edit'))
         else:
+
             messages.error(request, _('There were errors in the changes '
                                       'you made. Please correct them and '
                                       'resubmit.'))
@@ -218,7 +253,7 @@ def login(request):
                       '<a href="%s">resend the confirmation message</a> '
                       'to your email address mentioned above.') % url)
             messages.error(request, msg1)
-            messages.info(request, msg2)
+            messages.info(request, msg2, title_safe=True)
             return jingo.render(request, 'users/login.html',
                                 {'form': forms.AuthenticationForm()})
 
@@ -228,12 +263,12 @@ def login(request):
             log.debug((u'User (%s) logged in successfully with '
                                         '"remember me" set') % user)
         else:
-            log.debug(u"User (%s) logged in successfully" % user)
-    else:
+            user.log_login_attempt(request, True)
+    elif 'username' in request.POST:
         # Hitting POST directly because cleaned_data doesn't exist
-        if 'username' in request.POST:
-            log.debug(u"User (%s) failed to log in" %
-                                            request.POST['username'])
+        user = UserProfile.objects.filter(email=request.POST['username'])
+        if user:
+            user.get().log_login_attempt(request, False)
 
     return r
 
@@ -247,14 +282,12 @@ def logout(request):
     auth.logout(request)
 
     if 'to' in request.GET:
-       request = _clean_next_url(request)
+        request = _clean_next_url(request)
 
     next = request.GET.get('to') or settings.LOGOUT_REDIRECT_URL
     response = http.HttpResponseRedirect(next)
     # Fire logged out signal so we can be decoupled from cake.
     logged_out.send(None, request=request, response=response)
-
-
     return response
 
 
@@ -264,22 +297,30 @@ def profile(request, user_id):
 
     # get user's own and favorite collections, if they allowed that
     if user.display_collections:
-        own_coll = Collection.objects.filter(
-            collectionuser__user=user,
-            collectionuser__role=amo.COLLECTION_ROLE_ADMIN,
-            listed=True).order_by('name')
+        own_coll = (Collection.objects.listed().filter(author=user)
+                    .order_by('-created'))[:10]
     else:
         own_coll = []
     if user.display_collections_fav:
-        fav_coll = Collection.objects.filter(
-            collectionsubscription__user=user,
-            listed=True).order_by('name')
+        fav_coll = (Collection.objects.listed()
+                    .filter(following__user=user)
+                    .order_by('-following__created'))[:10]
     else:
         fav_coll = []
 
+    edit_any_user = acl.action_allowed(request, 'Admin', 'EditAnyUser')
+    own_profile = request.user.is_authenticated() and (
+        request.amo_user.id == user.id)
+
+    if user.is_developer:
+        addons = amo.utils.paginate(request, user.addons_listed)
+    else:
+        addons = []
+
     return jingo.render(request, 'users/profile.html',
                         {'profile': user, 'own_coll': own_coll,
-                         'fav_coll': fav_coll})
+                         'fav_coll': fav_coll, 'edit_any_user': edit_any_user,
+                         'addons': addons, 'own_profile': own_profile})
 
 
 def register(request):
@@ -287,21 +328,13 @@ def register(request):
         messages.info(request, _("You are already logged in to an account."))
         form = None
     elif request.method == 'POST':
+
         form = forms.UserRegisterForm(request.POST)
+
         if form.is_valid():
-            data = request.POST
-            u = UserProfile()
-            u.email = data.get('email')
-            u.emailhidden = data.get('emailhidden', False)
-            u.firstname = data.get('firstname', None)
-            u.lastname = data.get('lastname', None)
-            u.nickname = data.get('nickname', None)
-            u.homepage = data.get('homepage', None)
-
-            u.set_password(data.get('password'))
-            u.confirmationcode = ''.join(random.sample(
-                                         string.letters + string.digits, 60))
-
+            u = form.save(commit=False)
+            u.set_password(form.cleaned_data['password'])
+            u.generate_confirmationcode()
             u.save()
             u.create_django_user()
             log.info(u"Registered new account for user (%s)", u)
@@ -315,7 +348,12 @@ def register(request):
                      'activate your account by clicking on the link provided '
                      ' in this email.').format(u.email))
             messages.info(request, msg)
-            form = None
+
+            amo.utils.clear_messages(request)
+            return http.HttpResponseRedirect(reverse('users.login') + '?m=3')
+            # TODO POSTREMORA Replace the above with this line when remora goes away
+            #return http.HttpResponseRedirect(reverse('users.login'))
+
         else:
             messages.error(request, _(('There are errors in this form. Please '
                                        'correct them and resubmit.')))

@@ -1,16 +1,25 @@
 <!DOCTYPE html>
 <html lang="{{ LANG }}" dir="{{ DIR }}">
   <head>
+    <meta charset="utf-8">
     <title>{% block title %}{{ _('Mozilla Add-ons') }}{% endblock %}</title>
 
     <link rel="shortcut icon" type="image/x-icon"
           href="{{ MEDIA_URL}}img/favicon.ico">
-    <meta charset="utf-8">
 
-    {{ css('common') }}
-    {{ css('zamboni/z') }}
-    <!--[if IE]><link rel="stylesheet" href="{{ MEDIA_URL }}css/ie.css"><![endif]-->
-    <!--[if IE 7]><link rel="stylesheet" href="{{ MEDIA_URL }}css/ie7.css"><![endif]-->
+    {% block rss_feed %}{% endblock %}
+
+    {# L10n: {0} is an application, like Firefox. #}
+    <link title="{{ _('{0} Add-ons')|f(APP.pretty) }}"
+          rel="search" type="application/opensearchdescription+xml"
+          href="{{ url('amo.opensearch') }}" />
+
+    {% block site_css %}
+      {{ css('common') }}
+      {{ css('zamboni/z') }}
+      <!--[if IE]><link rel="stylesheet" href="{{ MEDIA_URL }}css/ie.css"><![endif]-->
+      <!--[if IE 7]><link rel="stylesheet" href="{{ MEDIA_URL }}css/ie7.css"><![endif]-->
+    {% endblock %}
 
     {% block extrahead %}{% endblock %}
     <noscript><link rel="stylesheet" href="{{ MEDIA_URL }}css/nojs.css"></noscript>
@@ -19,8 +28,21 @@
         data-app="{{ request.APP.short }}"
         data-appname="{{ request.APP.pretty }}"
         data-appid="{{ request.APP.id }}"
-        data-anonymous="{{ request.user.is_authenticated() and 'false' or 'true' }}"
+        data-anonymous="{{ (not request.user.is_authenticated())|json }}"
+        data-readonly="{{ settings.READ_ONLY|json }}"
         data-media-url="{{ MEDIA_URL }}">
+
+    {% if request.ADMIN_MESSAGE or settings.READ_ONLY%}
+      <div id="site-notice">
+        {% if request.ADMIN_MESSAGE %}
+          <p>{{ request.ADMIN_MESSAGE }}</p>
+        {% endif %}
+        {% if settings.READ_ONLY %}
+          <p>{{ _("Some features are temporarily disabled while we perform website maintenance. We'll be back to full capacity shortly.") }}</p>
+        {% endif %}
+      </div>
+      </div>
+    {% endif %}
     <div class="section">
 
       {% block site_header %}
@@ -37,6 +59,7 @@
           </p>
           {% block site_stats %}{% endblock %}
           <div id="aux-nav" role="navigation">
+            {% block aux_nav %}
             <ul id="other-apps" class="change"
                 title="{{ _('Find add-ons for other applications') }}">
               <li>
@@ -52,7 +75,10 @@
                 </ul>
               </li>
             </ul>
-            {% include "user_login.html" %}
+            {% endblock aux_nav %}
+            {% if not settings.READ_ONLY %}
+              {% include "user_login.html" %}
+            {% endif %}
           </div>
         </div>
       {% endblock site_header %}
@@ -66,18 +92,57 @@
           {% include "search.html" %}
         </div>
         {% endblock %}
+        {# outer_content is for something you want above content on every page. #}
+        {% block outer_content %}{% endblock %}
         {% block content %}{% endblock %}
       {% endblock %}
     </div>
-
+    <div id="tooltip">
+      <span></span>
+    </div>
+    <div id="popup-staging">
+      {{ sharing_box() }}
+      <div id="add-to-collection" class="popup">
+        <div class="collection-add-login">
+          <p>{% trans %}
+            To create your own collections, you must have a Mozilla Add-ons account.
+          {% endtrans %}</p>
+          <p class="register-button">
+            <a class="button" href="{{ remora_url('users/register') }}">{{ _('Create an Add-ons Account') }}</a>
+          </p>
+          <p>
+            {% trans login=login_link() %}
+              or <a href="{{ login }}">log in to your current account</a>
+            {% endtrans %}
+          </p>
+        </div>
+      </div>
+      {% block popups %}
+      {% endblock %}
+    </div>
     {# js #}
-    <script src="{{ url('django.views.i18n.javascript_catalog') }}"></script>
-    {{ js('common') }}
-    <script async defer src="{{ url('addons.buttons.js') }}/build:{{ BUILD_ID_JS }}"></script>
+    {% block site_js %}
+      <script src="{{ url('jsi18n') }}/build:{{ BUILD_ID_JS }}"></script>
+      {{ js('common') }}
+      <script async defer src="{{ url('addons.buttons.js') }}/build:{{ BUILD_ID_JS }}"></script>
+    {% endblock %}
     {% block js %}{% endblock %}
-    {% include "footer.html" %}
+    {% block footer %}
+      <div id="footer" role="contentinfo">
+        <div class="section">
+          <div class="primary">
+            {% include "footer.html" %}
+          </div> {# primary #}
+          <div class="secondary">
+            {% block footer_secondary %}
+              <img src="{{ MEDIA_URL }}img/amo2009/illustrations/footer-logo.png" alt="">
+            {% endblock %}
+          </div> {# secondary #}
+        </div> {# section #}
+      </div> {# footer #}
+    {% endblock %}
     {# Webtrends Stats Tracking #}
-    <script defer src="{{ STATIC_URL }}/js/webtrends/webtrends.js"></script>
+    <script defer src="{{ MEDIA_URL }}js/webtrends/webtrends-v0.1.js"></script>
     <noscript>
       <img id="DCSIMG" width="1" height="1"
         src="https://statse.webtrendslive.com/dcso6de4r0000082npfcmh4rf_4b1e/njs.gif?dcsuri=/nojavascript&amp;WT.js=No&amp;WT.tv=8.6.2" />

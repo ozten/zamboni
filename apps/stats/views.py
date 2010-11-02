@@ -1,4 +1,3 @@
-import csv
 import time
 from types import GeneratorType
 from datetime import date, datetime
@@ -8,12 +7,15 @@ from django.shortcuts import get_object_or_404
 from django.utils import simplejson
 from django.core.serializers.json import DjangoJSONEncoder
 from django.core.exceptions import PermissionDenied
+from django.views.decorators.cache import cache_control
 
 import jingo
 
 from access import acl
 from addons.models import Addon
+from amo.urlresolvers import reverse
 
+import unicode_csv
 from .db import DayAvg, Avg
 from .models import DownloadCount, UpdateCount, Contribution
 from .utils import csv_prep, csv_dynamic_prep
@@ -33,7 +35,7 @@ def downloads_series(request, addon_id, group, start, end, format):
 
     # resultkey to fieldname map - stored as a list to maintain order for csv
     fields = [('date', 'start'), ('count', 'count')]
-    qs = DownloadCount.objects.filter(addon=addon_id,
+    qs = DownloadCount.stats.filter(addon=addon_id,
                                       date__range=(start_date, end_date))
     gen = qs.period_summary(group, **dict(fields))
 
@@ -52,7 +54,7 @@ def usage_series(request, addon_id, group, start, end, format):
 
     # resultkey to fieldname map - stored as a list to maintain order for csv
     fields = [('date', 'start'), ('count', DayAvg('count'))]
-    qs = UpdateCount.objects.filter(addon=addon_id,
+    qs = UpdateCount.stats.filter(addon=addon_id,
                                     date__range=(start_date, end_date))
     gen = qs.period_summary(group, **dict(fields))
 
@@ -118,7 +120,7 @@ def sources_series(request, addon_id, group, start, end, format):
 
     # resultkey to fieldname map - stored as a list to maintain order for csv
     fields = [('date', 'start'), ('count', 'count'), ('sources', 'sources')]
-    qs = DownloadCount.objects.filter(addon=addon_id,
+    qs = DownloadCount.stats.filter(addon=addon_id,
                                       date__range=(start_date, end_date))
     gen = qs.period_summary(group, **dict(fields))
 
@@ -140,7 +142,7 @@ def usage_breakdown_series(request, addon_id, group,
     # Use DayAvg so days with 0 rows affect the calculation.
     fields = [('date', 'start'), ('count', DayAvg('count')),
               (field, DayAvg(field))]
-    qs = UpdateCount.objects.filter(addon=addon_id,
+    qs = UpdateCount.stats.filter(addon=addon_id,
                                     date__range=(start_date, end_date))
     gen = qs.period_summary(group, **dict(fields))
 
@@ -178,6 +180,53 @@ def check_stats_permission(request, addon, for_contributions=False):
     raise PermissionDenied
 
 
+def stats_report(request, addon_id, report):
+    addon = get_object_or_404(Addon.objects.valid(), id=addon_id)
+    check_stats_permission(request, addon)
+    stats_base_url = reverse('stats.overview', args=[addon.id])
+    view = get_report_view(request)
+    return jingo.render(request, 'stats/%s.html' % report,
+                        {'addon': addon,
+                        'report': report,
+                        'view': view,
+                        'stats_base_url': stats_base_url})
+
+
+def get_report_view(request):
+    """Parse and validate a pair of YYYMMDD date strings."""
+    if ('start' in request.GET and
+        'end' in request.GET):
+        try:
+            start = request.GET.get('start')
+            end = request.GET.get('end')
+
+            assert len(start) == 8
+            assert len(end) == 8
+
+            s_year = int(start[0:4])
+            s_month = int(start[4:6])
+            s_day = int(start[6:8])
+            e_year = int(end[0:4])
+            e_month = int(end[4:6])
+            e_day = int(end[6:8])
+
+            date(s_year, s_month, s_day)
+            date(e_year, e_month, e_day)
+
+            return {'range': 'custom',
+                    'start': start,
+                    'end': end}
+        except (KeyError, AssertionError, ValueError):
+            pass
+
+    if 'last' in request.GET:
+        daterange = request.GET.get('last')
+
+        return {'range': daterange, 'last': daterange}
+    else:
+        return {'range': '30', 'last': '30'}
+
+
 def get_daterange_or_404(start, end):
     """Parse and validate a pair of YYYMMDD date strings."""
     try:
@@ -206,12 +255,16 @@ def addon_contributions_queryset(addon, start_date, end_date):
         end_date = datetime(end_date.year, end_date.month,
                             end_date.day, 23, 59, 59)
 
-    return Contribution.objects.filter(addon=addon,
+    return Contribution.stats.filter(addon=addon,
                                      transaction_id__isnull=False,
                                      amount__gt=0,
                                      created__range=(start_date, end_date))
 
+# 30 days in seconds:
+thirty_days = 60 * 60 * 24 * 30
 
+
+@cache_control(max_age=thirty_days)
 def render_csv(request, addon, stats, fields):
     """Render a stats series in CSV."""
     # Start with a header from the template.
@@ -224,17 +277,18 @@ def render_csv(request, addon, stats, fields):
     # is first.
     # XXX: The list() performance penalty here might be big enough to
     # consider changing the sort order at lower levels.
-    writer = csv.writer(response)
+    writer = unicode_csv.UnicodeWriter(response)
     for row in reversed(list(stats)):
         writer.writerow(row)
 
-    response['Content-Type'] = 'text/plain'
+    response['Content-Type'] = 'text/plain; charset=utf-8'
     return response
 
 
+@cache_control(max_age=thirty_days)
 def render_json(request, addon, stats):
     """Render a stats series in JSON."""
-    response = http.HttpResponse(mimetype='text/plain')
+    response = http.HttpResponse(mimetype='text/json')
 
     # XXX: Subclass DjangoJSONEncoder to handle generators.
     if isinstance(stats, GeneratorType):

@@ -1,16 +1,38 @@
 {% from "addons/listing/macros.html" import heading, item_info %}
-{% cache addons %}
+{% set collection = collection or None %}
+{% set username = request.amo_user.username if request.user.is_authenticated() else '' %}
+{% cache addons, extra=[collection, username] %}
 {% for addon in addons %}
   <div class="item">
-    {{ heading(addon) }}
+    {{ heading(addon, collection=collection) }}
     <div class="item-info">
-      {{ install_button(addon) }}
-      {{ item_info(addon, amo) }}
+      {{ install_button(addon, collection=collection) }}
+      {{ item_info(addon, amo, show_date) }}
+      {% if request.user.is_authenticated() %}
+        <div class="collection_widgets widgets condensed">
+          {{ favorites_widget(addon, condensed=True) }}
+          {{ collection_add_widget(addon, condensed=True) }}
+          {{ sharing_widget(addon, condensed=True) }}
+        </div>
+      {% endif %}
     </div>
     <blockquote>
-      <div>{{ addon.summary|truncate(250)|nl2br }}</div>
+      {% if addon.is_persona() %}
+        {{ persona_preview(addon.persona, linked=False) }}
+      {% else %}
+        <div>{{ addon.summary|truncate(250)|nl2br }}</div>
+      {% endif %}
       {{ support_addon(addon) }}
     </blockquote>
+    {% if settings.PERFORMANCE_WARNINGS %}
+      {{ performance_note(amount=50, listing=True) }}
+    {% endif %}
+    {% if notes and notes[addon.id] %}
+    <blockquote class="collector-note">
+      <strong>{{ _("Collector's Note") }}</strong>
+      {{ notes[addon.id] }}
+    </blockquote>
+    {% endif %}
   </div>
 {% endfor %}
 {% endcache %}

@@ -19,6 +19,15 @@ def ids(qs):
     return [o.id for o in qs]
 
 
+class TranslationFixturelessTestCase(test.TestCase):
+    "We want to be able to rollback stuff."
+
+    def test_whitespace(self):
+        t = Translation(localized_string='     khaaaaaan!    ', id=999)
+        t.save()
+        eq_('khaaaaaan!', t.localized_string)
+
+
 class TranslationSequenceTestCase(test.TestCase):
     """
     Make sure automatic translation sequence generation works
@@ -175,7 +184,9 @@ class TranslationTestCase(ExtraAppTestCase):
         # Don't try checking that the model's name value is en-US.  It will be
         # one of the other locales, but we don't know which one.  You just set
         # the name to a dict, deal with it.
-        get_model().name = strings
+        m = get_model()
+        m.name = strings
+        m.save()
 
         # en-US was not touched.
         trans_eq(get_model().name, 'some name', 'en-US')
@@ -188,10 +199,20 @@ class TranslationTestCase(ExtraAppTestCase):
         translation.activate('fr')
         trans_eq(get_model().name, 'oui', 'fr')
 
+    def test_dict_bad_locale(self):
+        m = TranslatedModel.objects.get(id=1)
+        m.name = {'de': 'oof', 'xxx': 'bam', 'es-ES': 'si'}
+        m.save()
+
+        ts = Translation.objects.filter(id=m.name_id)
+        eq_(sorted(ts.values_list('locale', flat=True)),
+            ['de', 'en-US', 'es-ES'])
+
     def test_widget(self):
         strings = {'de': None, 'fr': 'oui'}
         o = TranslatedModel.objects.get(id=1)
         o.name = strings
+        o.save()
 
         # Shouldn't see de since that's NULL now.
         ws = widgets.trans_widgets(o.name_id, lambda *args: None)
@@ -309,6 +330,19 @@ class TranslationTestCase(ExtraAppTestCase):
             'awesomepage.html" rel="nofollow">http://example.org/awesomepage'
             '.html</a> .')
         eq_(m.linkified.localized_string, s)
+
+    def test_require_locale(self):
+        obj = TranslatedModel.objects.get(id=1)
+        eq_(unicode(obj.no_locale), 'blammo')
+        eq_(obj.no_locale.locale, 'en-US')
+
+        # Switch the translation to a locale we wouldn't pick up by default.
+        obj.no_locale.locale = 'fr'
+        obj.no_locale.save()
+
+        obj = TranslatedModel.objects.get(id=1)
+        eq_(unicode(obj.no_locale), 'blammo')
+        eq_(obj.no_locale.locale, 'fr')
 
 
 def test_translation_bool():

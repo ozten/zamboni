@@ -4,7 +4,7 @@
 
 {% set more_links = {
     'created': _('View All Recently Added'),
-    'downloads': _('View All Top Downloads'),
+    'popular': _('View All Top Downloads'),
     'rating': _('View All Top Rated'),
 } %}
 
@@ -12,7 +12,7 @@
 
 {% block content %}
 <header>
-  {{ breadcrumbs([(url('browse.extensions'), _('Extensions'))]) }}
+  {{ breadcrumbs([(url('browse.extensions'), _('Extensions')), (None, category.name)]) }}
   <h2>{{ category.name }}</h2>
 </header>
 
@@ -28,13 +28,13 @@
         {% cache addons %}
         {# The featured add-ons for a category should be small, so we get them all
            with the if.  Shuffling here to take advantage of the cached fragment. #}
-          {% for addon in addons|list|shuffle[:3] %}
+          {% for addon in (addons|list|shuffle)[:3] %}
           <li class="addon item">
             <h4>
               <a href="{{ addon.get_url_path() }}">
                 {{ addon.name.localized_string|truncate(35) }}</a>
               <span>
-                {% trans users=users_list(addon.authors.all()) %}
+                {% trans users=users_list(addon.listed_authors) %}
                   by {{ users }}
                 {% endtrans %}
               </span>
@@ -44,7 +44,7 @@
                 <img src="{{ addon.thumbnail_url }}"></a>
             </p>
             <p class="addon-desc">{{ addon.summary|truncate(100) }}</p>
-            <p class="addon-rating">{{ addon.bayesian_rating|stars }}</p>
+            <p class="addon-rating">{{ addon.average_rating|float|stars }}</p>
             {{ install_button(addon, src='creatured') }}
           </li>
           {% endfor %}
@@ -58,10 +58,10 @@
 <span class="meta">
 {% if key == 'created' -%}
   {{ _('added on {0}')|f(addon.created|datetime) }}
-{% elif key == 'downloads' %}
+{% elif key == 'popular' %}
   {{ _('{0} weekly downloads')|f(addon.weekly_downloads|numberfmt) }}
 {% elif key == 'rating' %}
-  {{ addon.bayesian_rating|stars }}
+  {{ addon.average_rating|float|stars }}
 {%- endif %}
 </span>
 {% endmacro %}

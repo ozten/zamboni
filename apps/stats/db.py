@@ -5,6 +5,10 @@ from decimal import Decimal, DivisionByZero
 from django.db import models
 
 import phpserialize as php
+try:
+    import simplejson as json
+except ImportError:
+    import json
 
 import caching.base
 
@@ -447,14 +451,7 @@ class StatsManager(caching.base.CachingManager):
         # so make that the default as a convenience.
         date_order = '-' + self.date_field
 
-        # Filter out '0000-00-00' dates which are sadly valid in the
-        # stats tables but mean nothing for analysis. '0000-00-00' is not
-        # null and does not have a python equivalent, so we have to filter
-        # using an inexact comparison.
-        date_filter = {self.date_field + '__gt': date(1990, 1, 1)}
-
-        return (StatsQuerySet(model=self.model)
-                .filter(**date_filter).order_by(date_order))
+        return StatsQuerySet(model=self.model).order_by(date_order)
 
 
 class StatsDict(dict):
@@ -546,17 +543,29 @@ class StatsDictField(models.TextField):
             return StatsDict(value)
 
         # string case
-        try:
-            d = php.unserialize(value)
-        except ValueError:
-            d = None
+        if value and value[0] in '[{':
+            # JSON
+            try:
+                d = json.loads(value)
+            except ValueError:
+                d = None
+        else:
+            # phpserialize data
+            try:
+                if isinstance(value, unicode):
+                    value = value.encode('utf8')
+                d = php.unserialize(value, decode_strings=True)
+            except ValueError:
+                d = None
         if isinstance(d, dict):
             return StatsDict(d)
         return None
 
     def get_db_prep_value(self, value):
+        if value is None or value == '':
+            return value
         try:
-            value = php.serialize(dict(value))
+            value = json.dumps(dict(value))
         except TypeError:
             value = None
         return value

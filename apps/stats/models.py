@@ -15,15 +15,37 @@ from amo.utils import send_mail as amo_send_mail
 from .db import StatsDictField, StatsManager
 
 
+class AddonCollectionCount(caching.base.CachingMixin, models.Model):
+    addon = models.ForeignKey('addons.Addon')
+    collection = models.ForeignKey('bandwagon.Collection')
+    count = models.PositiveIntegerField()
+    date = models.DateField()
+
+    class Meta:
+        db_table = 'stats_addons_collections_counts'
+
+
 class CollectionCount(caching.base.CachingMixin, models.Model):
     collection = models.ForeignKey('bandwagon.Collection')
     count = models.PositiveIntegerField()
     date = models.DateField()
 
-    objects = StatsManager('date')
+    objects = models.Manager()
+    stats = StatsManager('date')
 
     class Meta:
         db_table = 'stats_collections_counts'
+
+
+class CollectionStats(caching.base.CachingMixin, models.Model):
+    """In the running for worst-named model ever."""
+    collection = models.ForeignKey('bandwagon.Collection')
+    name = models.CharField(max_length=255, null=True)
+    count = models.PositiveIntegerField()
+    date = models.DateField()
+
+    class Meta:
+        db_table = 'stats_collections'
 
 
 class DownloadCount(caching.base.CachingMixin, models.Model):
@@ -34,10 +56,14 @@ class DownloadCount(caching.base.CachingMixin, models.Model):
     # Leave this out of queries if you can.
     sources = StatsDictField(db_column='src', null=True)
 
-    objects = StatsManager('date')
+    objects = models.Manager()
+    stats = StatsManager('date')
 
     class Meta:
         db_table = 'download_counts'
+
+    def flush_urls(self):
+        return ['*/addon/%d/statistics/downloads*' % self.addon_id, ]
 
 
 class UpdateCount(caching.base.CachingMixin, models.Model):
@@ -52,33 +78,51 @@ class UpdateCount(caching.base.CachingMixin, models.Model):
     oses = StatsDictField(db_column='os', null=True)
     locales = StatsDictField(db_column='locale', null=True)
 
-    objects = StatsManager('date')
+    objects = models.Manager()
+    stats = StatsManager('date')
 
     class Meta:
         db_table = 'update_counts'
 
+    def flush_urls(self):
+        return ['*/addon/%d/statistics/usage*' % self.addon_id, ]
 
-class ShareCount(caching.base.CachingMixin, models.Model):
+
+class AddonShareCount(caching.base.CachingMixin, models.Model):
     addon = models.ForeignKey('addons.Addon')
     count = models.PositiveIntegerField()
     service = models.CharField(max_length=255, null=True)
     date = models.DateField()
 
-    objects = StatsManager('date')
+    objects = models.Manager()
+    stats = StatsManager('date')
 
     class Meta:
         db_table = 'stats_share_counts'
 
 
-class ShareCountTotal(caching.base.CachingMixin, models.Model):
+class AddonShareCountTotal(caching.base.CachingMixin, models.Model):
     addon = models.ForeignKey('addons.Addon')
+    count = models.PositiveIntegerField()
+    service = models.CharField(max_length=255, null=True)
+
+    objects = caching.base.CachingManager()
+    stats = caching.base.CachingManager()
+
+    class Meta:
+        db_table = 'stats_share_counts_totals'
+
+
+# stats_collections_share_counts exists too, but we don't touch it.
+class CollectionShareCountTotal(caching.base.CachingMixin, models.Model):
+    collection = models.ForeignKey('bandwagon.Collection')
     count = models.PositiveIntegerField()
     service = models.CharField(max_length=255, null=True)
 
     objects = caching.base.CachingManager()
 
     class Meta:
-        db_table = 'stats_share_counts_totals'
+        db_table = 'stats_collections_share_counts_totals'
 
 
 class ContributionError(Exception):
@@ -106,13 +150,17 @@ class Contribution(caching.base.CachingMixin, models.Model):
     transaction_id = models.CharField(max_length=255, null=True)
     post_data = StatsDictField(null=True)
 
-    objects = StatsManager('created')
+    objects = models.Manager()
+    stats = StatsManager('created')
 
     class Meta:
         db_table = 'stats_contributions'
 
     def __unicode__(self):
         return u'%s: %s' % (self.addon.name, self.amount)
+
+    def flush_urls(self):
+        return ['*/addon/%d/statistics/contributions*' % self.addon_id, ]
 
     @property
     def date(self):
@@ -207,6 +255,14 @@ class Contribution(caching.base.CachingMixin, models.Model):
             del(self.post_data['payer_email'])
             self.save()
 
+    @staticmethod
+    def post_save(sender, instance, **kwargs):
+        from . import tasks
+        tasks.addon_total_contributions.delay(instance.addon_id)
+
+
+models.signals.post_save.connect(Contribution.post_save, sender=Contribution)
+
 
 class SubscriptionEvent(ModelBase):
     """Save subscription info for future processing."""
@@ -222,6 +278,7 @@ class GlobalStat(caching.base.CachingMixin, models.Model):
     date = models.DateField()
 
     objects = caching.base.CachingManager()
+    stats = caching.base.CachingManager()
 
     class Meta:
         db_table = 'global_stats'

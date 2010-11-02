@@ -9,15 +9,10 @@
 
 {% block content %}
 <div class="primary" role="main">
-  {% if messages %}
-    {% for message in messages %}
-      <div class="notification-box {{ message.tags }}">
-        <h2>{{ message }}</h2>
-      </div>
-    {% endfor %}
-  {% endif %}
-  <h1>{{ _('Account Settings') }}</h1>
-  <form method="post" action="" class="user-input">
+  {% include "messages.html" %}
+  <h2>{{ _('Account Settings') }}</h2>
+  <form method="post" action="" class="user-input"
+        enctype="multipart/form-data">
     {{ csrf() }}
     <div id="user-edit" class="tab-wrapper">
       <ul class="tab-nav main">
@@ -29,9 +24,9 @@
           <legend>{{ _('My account') }}</legend>
           <ul>
             <li>
-              <label for="id_nickname">{{ _('Nickname') }} {{ required() }}</label>
-              {{ form.nickname|safe }}
-              {{ form.nickname.errors|safe }}
+              <label for="id_username">{{ _('Username') }} {{ required() }}</label>
+              {{ form.username|safe }}
+              {{ form.username.errors|safe }}
             </li>
             <li>
               <label for="id_email">{{ _('Email Address') }} {{ required() }}</label>
@@ -73,8 +68,9 @@
           <legend>{{ _('Notifications') }}</legend>
           <p>
             {% trans %}
-            From time to time, Mozilla may send you email about upcoming releases
-            and add-on events. Please select the topics you are interested in below:
+            From time to time, Mozilla may send you email about upcoming
+            releases and add-on events. Please select the topics you are
+            interested in below:
             {% endtrans %}
           </p>
           <ul>
@@ -95,8 +91,8 @@
           </ul>
           <p class="note">
             {% trans %}
-              Mozilla reserves the right to contact you individually about specific
-              concerns with your hosted add-ons.
+              Mozilla reserves the right to contact you individually about
+              specific concerns with your hosted add-ons.
             {% endtrans %}
           </p>
         </fieldset>
@@ -106,14 +102,9 @@
           <legend>{{ _('Profile information') }}</legend>
           <ol>
             <li>
-              <label for="id_firstname">{{ _('First name') }} {{ required() }}</label>
-              {{ form.firstname|safe }}
-              {{ form.firstname.errors|safe }}
-            </li>
-            <li>
-              <label for="id_lastname">{{ _('Last name') }}</label>
-              {{ form.lastname|safe }}
-              {{ form.lastname.errors|safe }}
+              <label for="id_display_name">{{ _('Display Name') }}</label>
+              {{ form.display_name|safe }}
+              {{ form.display_name.errors|safe }}
             </li>
             <li>
               <label for="id_location">{{ _('Location') }}</label>
@@ -131,12 +122,15 @@
               {{ form.homepage.errors|safe }}
             </li>
             <li class="profile-photo">
-              {# TODO XXX: Change these fields out for whatever we need to do notifications #}
-              {# TODO XXX: Add L10n #}
-                <label for="id_photo">Profile Photo</label>
-                <input type="file" id="id_photo" name="photo">
-                <img src="../media/img/amo2009/site-images/avatar-developer-200x200.jpg" alt="" width="200" height="200" class="avatar photo-large photo" />
-                <a href="#">Delete current photo</a>
+              <label for="id_photo">{{ _('Profile Photo') }}</label>
+              <input type="file" id="id_photo" name="photo">
+              {{ form.photo.errors|safe }}
+              <img src="{{ amouser.picture_url }}" alt=""
+                   class="avatar photo" />
+
+              {% if amouser.picture_type %}
+              <a href="{{ url('users.delete_photo') }}">{{ _('Delete current photo') }}</a>
+              {% endif %}
             </li>
           </ol>
         </fieldset>
@@ -146,10 +140,15 @@
             {% trans -%}
               Introduce yourself to the community, if you like!
               This text will appear publicly on your user info page.
-              <a href="#">Some HTML allowed</a>
             {%- endtrans %}
           </p>
           {{ form.bio|safe }}
+          <p class="allowed-html">
+            <strong>{{ _('Some HTML allowed:') }}</strong>
+            &lt;a href title&gt; &lt;abbr title&gt; &lt;acronym title&gt;
+            &lt;b&gt; &lt;blockquote&gt; &lt;code&gt; &lt;em&gt; &lt;i&gt;
+            &lt;li&gt; &lt;ol&gt; &lt;strong&gt; &lt;ul&gt;
+          </p>
           {{ form.bio.errors|safe }}
         </fieldset> {# /.profile-detail #}
 
@@ -164,7 +163,7 @@
           <li>
             <label for="id_display_collections_fav" class="check">
               {{ form.display_collections_fav|safe }}
-              {{ _('Display my favorite collections') }}
+              {{ _("Display collections I'm following") }}
             </label>
             {{ form.display_collections_fav.errors|safe }}
           </li>

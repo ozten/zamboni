@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}
+  {% if query %}
+    {{ page_title(_('Collection Search Results for {0}')|f(query)) }}
+  {% else %}
+    {{ page_title(_('Collection Search Results')) }}
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="primary" role="main">
+  <header class="results-head">
+    {{ breadcrumbs([(None, _('Search'))]) }}
+    <h2>{{ _('Collection Search Results') }}</h2>
+    <h3 class="results-count">{{ showing(query, tag, pager) }}</h3>
+  </header>
+  <div class="featured listing">
+    {% if pager.object_list %}
+      <div class="featured-inner">
+        <div class="listing-header">
+          <form class="item-sort go" action="">
+            <div>
+              {{ form['q']|safe }}
+              {{ form['cat']|safe }}
+              {{ form['pp']|safe }}
+              <label for="id_sortby">
+                {{ form['sortby'].label }}
+              </label>
+              {{ form['sortby']|safe }}
+            </div>
+          </form>
+        </div>
+        {{ collection_listing_items(pager.object_list,
+                                    show_date=opts.sort) }}
+      </div>
+      <div class="listing-footer">{{ pager|paginator }}</div>
+    {% else %}
+      {% include 'search/no_results.html' %}
+    {% endif %}
+  </div>
+</div> {# /primary #}
+
+<div class="secondary" role="complementary">
+  {% include 'bandwagon/includes/collection_sidebar.html' %}
+</div>
+
+{% endblock %}

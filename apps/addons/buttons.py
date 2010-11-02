@@ -21,16 +21,20 @@ def install_button(context, addon, version=None, show_eula=True,
     app, lang = context['APP'], context['LANG']
     show_eula = bool(request.GET.get('eula', show_eula))
     src = src or context.get('src') or request.GET.get('src', '')
-    collection = (collection or context.get('collection')
-                  or request.GET.get('collection')
-                  or request.GET.get('collection_id')
-                  or request.GET.get('collection_uuid'))
+    collection = ((collection.uuid if hasattr(collection, 'uuid') else None)
+                   or collection
+                   or context.get('collection')
+                   or request.GET.get('collection')
+                   or request.GET.get('collection_id')
+                   or request.GET.get('collection_uuid'))
     button = install_button_factory(addon, app, lang, version,
                                     show_eula, show_contrib, show_warning,
                                     src, collection, size, detailed)
+    installed = (request.user.is_authenticated() and
+                 addon.id in request.amo_user.mobile_addons)
     c = {'button': button, 'addon': addon, 'version': button.version,
-         'APP': app, 'LANG': context['LANG']}
-    t = jingo.env.get_template('addons/button.html').render(c)
+         'installed': installed}
+    t = jingo.render_to_string(request, 'addons/button.html', c)
     return jinja2.Markup(t)
 
 
@@ -75,13 +79,17 @@ class InstallButton(object):
         self.size = size
         self.detailed = detailed
 
+        self.is_beta = self.version and self.version.is_beta
         version_unreviewed = (self.version and self.version.is_unreviewed)
-        self.unreviewed = addon.is_unreviewed() or version_unreviewed
+        self.unreviewed = (addon.is_unreviewed() or version_unreviewed or
+                           self.is_beta)
         self.self_hosted = addon.status == amo.STATUS_LISTED
-        self.featured = (not self.unreviewed and not self.self_hosted
+        self.featured = (not self.unreviewed
+                         and not self.self_hosted
+                         and not self.is_beta
                          and addon.is_featured(app, lang)
                          or addon.is_category_featured(app, lang))
-        self.is_persona = addon.type_id == amo.ADDON_PERSONA
+        self.is_persona = addon.type == amo.ADDON_PERSONA
 
         self.accept_eula = addon.has_eula and not show_eula
         self.show_contrib = (show_contrib and addon.takes_contributions
@@ -110,13 +118,15 @@ class InstallButton(object):
             self.install_class.append('accept')
         if self.size:
             self.button_class.append(self.size)
+        if self.is_beta:
+            self.install_class.append('beta')
 
     def attrs(self):
         rv = {}
         addon = self.addon
         if addon.takes_contributions and addon.annoying == amo.CONTRIB_AFTER:
             rv['data-after'] = 'contrib'
-        if addon.type_id == amo.ADDON_SEARCH:
+        if addon.type == amo.ADDON_SEARCH:
             rv['data-search'] = 'true'
         return rv
 
@@ -133,8 +143,11 @@ class InstallButton(object):
 
     def file_details(self, file):
         platform = file.platform_id
-        url = (file.latest_xpi_url() if self.latest else
-               file.get_url_path(self.src))
+        if self.latest and (
+            self.addon.status == file.status == amo.STATUS_PUBLIC):
+            url = file.latest_xpi_url()
+        else:
+            url = file.get_url_path(self.app, self.src)
 
         if platform == amo.PLATFORM_ALL.id:
             text, os = _('Download Now'), None
@@ -142,14 +155,16 @@ class InstallButton(object):
             text, os = _('Download'), amo.PLATFORMS[platform]
 
         if self.show_eula:
-            text, url = _('Continue to Download &rarr;'), file.eula_url()
+			# L10n: please keep &nbsp; in the string so the &rarr; does not wrap
+            text, url = _('Continue to Download&nbsp;&rarr;'), file.eula_url()
         elif self.accept_eula:
             text = _('Accept and Download')
         elif self.show_contrib:
             # The eula doesn't exist or has been hit already.
-            text = _('Continue to Download &rarr;')
-            roadblock = self.addon.meet_the_dev_url(extra='roadblock')
-            url = urlparams(roadblock, eula='')
+			# L10n: please keep &nbsp; in the string so the &rarr; does not wrap
+            text = _('Continue to Download&nbsp;&rarr;')
+            roadblock = reverse('addons.roadblock', args=[self.addon.id])
+            url = urlparams(roadblock, eula='', version=self.version.version)
 
         return text, url, os
 
@@ -178,14 +193,15 @@ class SelfHostedInstallButton(InstallButton):
     button_class = ['go']
 
     def links(self):
-        return [Link(_('Continue to Website &rarr;'), self.addon.homepage)]
+		# L10n: please keep &nbsp; in the string so the &rarr; does not wrap
+        return [Link(_('Continue to Website&nbsp;&rarr;'), self.addon.homepage)]
 
 
 class PersonaInstallButton(InstallButton):
     install_class = ['persona']
 
     def links(self):
-        return [Link(_('Add to {0}').format(unicode(self.app.pretty)),
+        return [Link(_(u'Add to {0}').format(unicode(self.app.pretty)),
                      reverse('addons.detail', args=[amo.PERSONAS_ADDON_ID]))]
 
     def attrs(self):

@@ -1,0 +1,38 @@
+{% extends "reviews/review_list.html" %}
+
+{% set title = _('Reply to review by {0}')|f(review.user.name) %}
+
+{% block title %}{{ page_title(title) }}{% endblock %}
+
+{% block content %}
+  {% block review_header %}
+    <header>
+      {{ breadcrumbs([(addon.type_url(), amo.ADDON_TYPES[addon.type]),
+                      (addon.get_url_path(), addon.name),
+                      (url('reviews.list', addon.id), _('Reviews')),
+                      (None, _('Reply'))]) }}
+      <h2>{{ title }}</h2>
+    </header>
+  {% endblock %}
+
+  {% block review_list %}
+    {% include "reviews/review.html" %}
+    <div class="review article reply-form">
+      <h3>{{ _('Write a Reply') }}</h3>
+      <form method="post" action="{{ url('reviews.reply', addon.id, review.id) }}">
+        {{ csrf() }}
+        <p>
+          <label for="id_title">{{ form.title.label|safe }} <span class="optional">{{ _('(optional)') }}</span></label>
+          {{ form.title|safe }}
+        </p>
+        {{ field(form.body, _('Reply:')) }}
+        <input type="submit" value="{{ _('Submit Your Reply') }}">
+        {# L10n: this string is following a <button>. #}
+        {% trans url=url('reviews.list', addon.id) %}
+          or <a href="{{ url }}">Cancel</a>
+        {% endtrans %}
+      </form>
+    </div>
+  {% endblock %}
+{{ report_review_popup() }}
+{% endblock %}

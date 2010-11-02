@@ -2,10 +2,11 @@ import collections
 import json as jsonlib
 import math
 import random
-import urllib
+import re
 
 from django.conf import settings
 from django.utils import translation
+from django.utils.encoding import smart_unicode
 from django.template import defaultfilters
 
 from babel import Locale
@@ -18,6 +19,7 @@ from tower import ugettext as _
 import amo
 from amo import utils, urlresolvers
 from addons.models import Category
+from translations.models import Translation
 from translations.query import order_by_translation
 
 # Yanking filters from Django.
@@ -27,6 +29,8 @@ register.filter(defaultfilters.slugify)
 urlparams = register.filter(utils.urlparams)
 register.filter(utils.epoch)
 register.filter(utils.isotime)
+register.function(dict)
+register.function(utils.randslice)
 
 
 @register.function
@@ -41,7 +45,11 @@ def locale_url(url):
 @register.function
 def url(viewname, *args, **kwargs):
     """Helper for Django's ``reverse`` in templates."""
-    return urlresolvers.reverse(viewname, args=args, kwargs=kwargs)
+    add_prefix = kwargs.pop('add_prefix', True)
+    return urlresolvers.reverse(viewname,
+                                args=args,
+                                kwargs=kwargs,
+                                add_prefix=add_prefix)
 
 
 @register.filter
@@ -66,21 +74,21 @@ def sidebar(app):
     categories = order_by_translation(q, 'name')
     categories.query.extra_order_by.insert(0, 'weight')
 
-    # TODO(jbalogh): real reverse
     Type = collections.namedtuple('Type', 'name url')
     base = urlresolvers.reverse('home')
     types = [Type(_('Collections'), base + 'collections/')]
     shown_types = {
-        amo.ADDON_PERSONA: base + 'personas/',
-        amo.ADDON_DICT: urlresolvers.reverse('browse.language_tools'),
-        amo.ADDON_SEARCH: base + 'browse/type:4',
+        amo.ADDON_PERSONA: urlresolvers.reverse('browse.personas'),
+        amo.ADDON_DICT: urlresolvers.reverse('browse.language-tools'),
+        amo.ADDON_SEARCH: urlresolvers.reverse('browse.search-tools'),
         amo.ADDON_PLUGIN: base + 'browse/type:7',
         amo.ADDON_THEME: urlresolvers.reverse('browse.themes'),
     }
+    titles = dict(amo.ADDON_TYPES,
+                  **{amo.ADDON_DICT: _('Dictionaries & Language Packs')})
     for type_, url in shown_types.items():
         if type_ in app.types:
-            name = amo.ADDON_TYPES[type_]
-            types.append(Type(name, url))
+            types.append(Type(titles[type_], url))
 
     return categories, sorted(types, key=lambda x: x.name)
 
@@ -137,7 +145,7 @@ def currencyfmt(num, currency):
     return _get_format().currency(num, currency)
 
 
-def _page_name(app=None):
+def page_name(app=None):
     """Determine the correct page name for the given app (or no app)."""
     if app:
         return _(u'Add-ons for {0}').format(app.pretty)
@@ -149,6 +157,12 @@ def _page_name(app=None):
 @jinja2.contextfunction
 def login_link(context):
     next = context['request'].path
+
+    qs = context['request'].GET.urlencode()
+
+    if qs:
+        next += '?' + qs
+
     l = urlparams(urlresolvers.reverse('users.login'), to=next)
     return l
 
@@ -157,7 +171,7 @@ def login_link(context):
 @jinja2.contextfunction
 def page_title(context, title):
     app = context['request'].APP
-    return u'%s :: %s' % (title, _page_name(app))
+    return u'%s :: %s' % (smart_unicode(title), page_name(app))
 
 
 @register.function
@@ -169,7 +183,7 @@ def breadcrumbs(context, items=list(), add_default=True):
     """
     if add_default:
         app = context['request'].APP
-        crumbs = [(urlresolvers.reverse('home'), _page_name(app))]
+        crumbs = [(urlresolvers.reverse('home'), page_name(app))]
     else:
         crumbs = []
 
@@ -183,41 +197,6 @@ def breadcrumbs(context, items=list(), add_default=True):
     c = {'breadcrumbs': crumbs}
     t = env.get_template('amo/breadcrumbs.html').render(**c)
     return jinja2.Markup(t)
-
-
-# TODO(davedash): Deprecate this in favor of |round|int
-@register.filter
-def wround(value, precision=0, method='common'):
-    """Round the number to a given precision. The first
-    parameter specifies the precision (default is ``0``), the
-    second the rounding method:
-
-    - ``'common'`` rounds either up or down
-    - ``'ceil'`` always rounds up
-    - ``'floor'`` always rounds down
-
-    If you don't specify a method ``'common'`` is used.
-
-    .. sourcecode:: jinja
-
-        {{ 42.55|round }}
-            -> 43
-        {{ 42.55|round(1, 'floor') }}
-            -> 42.5
-    """
-    if not method in ('common', 'ceil', 'floor'):  # pragma: no cover
-        raise FilterArgumentError('method must be common, ceil or floor')
-    if precision < 0:
-        raise FilterArgumentError('precision must be a postive integer '
-                                  'or zero.')
-    if method == 'common':
-        val = round(value, precision)
-        return val if precision else int(val)
-    func = getattr(math, method)
-    if precision:
-        return func(value * 10 * precision) / (10 * precision)
-    else:
-        return int(func(value))
 
 
 @register.filter
@@ -242,6 +221,19 @@ def strip_controls(s):
 
 
 @register.filter
+def strip_html(s, just_kidding=False):
+    """Strips HTML.  Confirm lets us opt out easily."""
+    if just_kidding:
+        return s
+
+    if not s:
+        return ''
+    else:
+        s = re.sub(r'&lt;.*?&gt;', '', smart_unicode(s, errors='ignore'))
+        return re.sub(r'<.*?>', '', s)
+
+
+@register.filter
 def external_url(url):
     """Bounce a URL off outgoing.mozilla.org."""
     return urlresolvers.get_outgoing_url(unicode(url))
@@ -259,21 +251,23 @@ def license_link(license):
     """Link to a code license, incl. icon where applicable."""
     if not license:
         return ''
+    if not license.builtin:
+        return _('Custom License')
     lic_icon = lambda name: '<li class="icon %s"></li>' % name
 
     parts = []
     parts.append('<ul class="license">')
     if license.icons:
-        for i in license.icons:
+        for i in license.icons.split():
             parts.append(lic_icon(i))
 
     # TODO link to custom license page
     parts.append('<li class="text">')
 
     if license.url:
-        if license.linktext:
-            title = ' title="%s"' % unicode(license.name)
-            linktext = license.linktext
+        if license.some_rights:
+            title = ' title="%s"' % license.name
+            linktext = _('Some rights reserved')
         else:
             title = ''
             linktext = license.name
@@ -285,3 +279,27 @@ def license_link(license):
     parts.append('</li></ul>')
 
     return jinja2.Markup(''.join(parts))
+
+
+@register.function
+def field(field, label=None, **attrs):
+    if label is not None:
+        field.label = label
+    return jinja2.Markup(u'%s<p>%s%s</p>' %
+                         (field.errors, field.label_tag(),
+                          field.as_widget(attrs=attrs)))
+
+
+@register.inclusion_tag('amo/category-arrow.html')
+@jinja2.contextfunction
+def category_arrow(context, key, prefix):
+    d = dict(context.items())
+    d.update(key=key, prefix=prefix)
+    return d
+
+
+@register.filter
+def timesince(time):
+    ago = defaultfilters.timesince(time)
+    # L10n: relative time in the past, like '4 days ago'
+    return _(u'{0} ago').format(ago)

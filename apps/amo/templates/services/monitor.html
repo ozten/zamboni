@@ -1,7 +1,13 @@
 {% extends 'base.html' %}
+
 {% block title %}Mozilla Add-ons Site Status{% endblock title %}
+
+{% macro status(b) %}
+  {% if b %}info{% else %}error{% endif %}
+{% endmacro %}
+
 {% block main_content %}
-<div class="notification-box {% if status_summary.memcache %}info{% else %}error{% endif %}">
+<div class="notification-box {{ status(status_summary.memcache) }}">
   <h2>[Memcache] Connection Tests</h2>
   <ul>
   {% for ip, port, result in memcache_results %}
@@ -17,6 +23,100 @@
   {% endfor %}
   </ul>
   <p>There must be a minimum of 2 working servers.</p>
+</div>
+
+<div class="notification-box {{ status(status_summary.libraries) }}">
+  <h2>[libs] Libraries and Versions</h2>
+  <dl>
+  {% for lib, result, msg in libraries_results %}
+    <dt>{{ lib }}</dt>
+    <dd>
+    {% if success %}
+      {{ msg }}
+    {% else %}
+      <strong>{{ msg }}</strong>
+    {% endif %}
+    </dd>
+  {% endfor %}
+  </dl>
+</div>
+<div class="notification-box {{ status(status_summary.filepaths) }}">
+  <h2>[Paths] Paths and Permissions</h2>
+  <dl>
+  {% for path, exists, permissions, extra in filepath_results %}
+    <dt>{{ path }}</dt>
+    <dd>
+    {% if exists %}
+      Exists...
+    {% else %}
+      <strong>Does not exist</strong>
+    {% endif %}
+
+    {% if permissions %}
+      with proper permissions.
+    {% else %}
+      <strong>and does not have the permissions we expect.</strong>
+    {% endif %}
+    {% if extra %}
+      ({{ extra }})
+    {% endif %}
+    </dd>
+  {% endfor %}
+  </dl>
+</div>
+
+<div class="notification-box {{ status(status_summary.redis) }}">
+  <h2>[Redis] Redis Info</h2>
+  {% with info, error = redis_results %}
+    {% if info %}
+      <ul>
+        {% for k, v in info|dictsort %}
+          <li><code>{{ k }}: {{ v }}</code></li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <strong>Error!</strong>
+      <code>{{ error }}</code>
+    {% endif %}
+  {% endwith %}
+</div>
+
+<div class="notification-box {{ status(status_summary.hera) }}">
+  <h2>[Zeus] Connection Tests (Hera)</h2>
+  <ul>
+  {% for result in hera_results %}
+    <li>{{ result.location }}:
+    {% if result.result %}
+      Success
+    {% else %}
+      <strong>Failed</strong>
+    {% endif %}
+    </li>
+  {% else %}
+    <li>Hera isn't configured!</li>
+  {% endfor %}
+  </ul>
+</div>
+
+{#
+<div class="notification-box {{ status(status_summary.rabbit) }}">
+  <h2>[RabbitMQ] celeryd connection</h2>
+  <p>Processed a task in {{ rabbit_results.duration|round(4) }} seconds.</p>
+</div>
+#}
+
+<div class="notification-box {{ status(status_summary.mongo) }}">
+  <h2>[Mongo] Connection Test</h2>
+  <ul>
+    <li>
+    {{ settings.MONGO_HOST }}:{{ settings.MONGO_PORT }}/{{settings.MONGO_DATABASE}}:
+    {% if status_summary.mongo %}
+      Success
+    {% else %}
+      <strong>Failed</strong>.  Grep log for z.mongo.
+    {% endif %}
+    </li>
+  </ul>
 </div>
 
 {% endblock main_content %}

@@ -3,9 +3,11 @@ import os
 from django.conf import settings
 from django.db import models
 
+from uuidfield.fields import UUIDField
+
 import amo.models
+import amo.utils
 from amo.urlresolvers import reverse
-from cake.urlresolvers import remora_url
 
 
 class File(amo.models.ModelBase):
@@ -14,9 +16,10 @@ class File(amo.models.ModelBase):
     version = models.ForeignKey('versions.Version', related_name='files')
     platform = models.ForeignKey('Platform')
     filename = models.CharField(max_length=255, default='')
-    size = models.PositiveIntegerField(default=0)
+    size = models.PositiveIntegerField(default=0)  # kilobytes
     hash = models.CharField(max_length=255, default='')
     codereview = models.BooleanField(default=False)
+    jetpack = models.BooleanField(default=False)
     status = models.PositiveSmallIntegerField(choices=STATUS_CHOICES,
                 default=0)
     datestatuschanged = models.DateTimeField(null=True)
@@ -24,27 +27,68 @@ class File(amo.models.ModelBase):
     class Meta(amo.models.ModelBase.Meta):
         db_table = 'files'
 
-    def get_url_path(self, src):
-        return settings.FILES_URL % (self.id, self.filename, src)
+    @property
+    def amo_platform(self):
+        # TODO: Ideally this would be ``platform``.
+        return amo.PLATFORMS[self.platform_id]
+
+    def get_url_path(self, app, src):
+        # TODO: remove app
+        from amo.helpers import urlparams
+        url = reverse('downloads.file', args=[self.id]) + self.filename
+        return urlparams(url, src=src)
+
+    def generate_filename(self, extension='xpi'):
+        """
+        Files are in the format of:
+        {addon_name}-{version}-{apps}-{platform}
+        """
+        parts = []
+        parts.append(
+                amo.utils.slugify(self.version.addon.name).replace('-', '_'))
+        parts.append(self.version.version)
+
+        if self.version.compatible_apps:
+            apps = '+'.join([a.shortername for a in
+                             self.version.compatible_apps])
+            parts.append(apps)
+
+        if self.platform_id and self.platform_id != amo.PLATFORM_ALL.id:
+            parts.append(amo.PLATFORMS[self.platform_id].shortname)
+
+        self.filename = '-'.join(parts) + '.' + extension
+        return self.filename
 
     def latest_xpi_url(self):
-        # TODO(jbalogh): reverse?
         addon = self.version.addon_id
-        url = ['/downloads/latest/%s' % addon]
+        kw = {'addon_id': addon}
         if self.platform_id != amo.PLATFORM_ALL.id:
-            url.append('platform:%s' % self.platform_id)
-        url.append('addon-%s-latest%s' % (addon, self.extension))
-        return os.path.join(*url)
+            kw['platform'] = self.platform_id
+        url = reverse('downloads.latest', kwargs=kw)
+        return os.path.join(url, 'addon-%s-latest%s' % (addon, self.extension))
 
     def eula_url(self):
-        return remora_url('/addons/policy/0/{addonid}/{fileid}'.format(
-            addonid=self.version.addon_id, fileid=self.id))
-        # TODO: change this back to a reverse URL
-        # return reverse('addons.eula', args=[addon, self.id])
+        return reverse('addons.eula', args=[self.version.addon_id, self.id])
+
+    @property
+    def file_path(self):
+        return os.path.join(settings.ADDONS_PATH, str(self.version.addon_id),
+                            self.filename)
 
     @property
     def extension(self):
         return os.path.splitext(self.filename)[-1]
+
+
+def cleanup_file(sender, instance, **kw):
+    """ On delete of the file object from the database, unlink the file from
+    the file system """
+    filename = instance.file_path
+    if os.path.exists(filename):
+        os.remove(filename)
+
+models.signals.post_delete.connect(cleanup_file,
+            sender=File, dispatch_uid='cleanup_file')
 
 
 class Approval(amo.models.ModelBase):
@@ -74,10 +118,26 @@ class Platform(amo.models.ModelBase):
     class Meta(amo.models.ModelBase.Meta):
         db_table = 'platforms'
 
+    def __unicode__(self):
+        return unicode(amo.PLATFORMS[self.id].name)
+
+
+class FileUpload(amo.models.ModelBase):
+    """Created when a file is uploaded for validation/submission."""
+    uuid = UUIDField(primary_key=True, auto=True)
+    path = models.CharField(max_length=255)
+    name = models.CharField(max_length=255,
+                            help_text="The user's original filename")
+    user = models.ForeignKey('users.UserProfile', null=True)
+    validation = models.TextField(null=True)
+    task_error = models.TextField(null=True)
+
+    class Meta(amo.models.ModelBase.Meta):
+        db_table = 'file_uploads'
+
 
 class TestCase(amo.models.ModelBase):
     test_group = models.ForeignKey('TestGroup')
-    platform = models.ForeignKey('Platform')
     help_link = models.CharField(max_length=255, blank=True,
             help_text='Deprecated')
     function = models.CharField(max_length=255,
@@ -112,13 +172,13 @@ class TestResult(amo.models.ModelBase):
         db_table = 'test_results'
 
 
-class TestResultCache(amo.models.ModelBase):
+class TestResultCache(models.Model):
     """When a file is checked the results are stored here in JSON.  This is
     temporary storage and removed with the garbage cleanup cron."""
     date = models.DateTimeField()
     key = models.CharField(max_length=255, db_index=True)
     test_case = models.ForeignKey(TestCase)
-    message = models.TextField(blank=True)
+    value = models.TextField(blank=True)
 
     class Meta(amo.models.ModelBase.Meta):
         db_table = 'test_results_cache'

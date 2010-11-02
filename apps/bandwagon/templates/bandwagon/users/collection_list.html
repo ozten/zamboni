@@ -1,12 +1,14 @@
 {% if collections: %}
-<h4>{{ heading }}</h4>
+{% if link %}
+  <h4><a href="{{ link }}">{{ heading }}</a></h4>
+{% else %}
+  <h4>{{ heading }}</h4>
+{% endif %}
 <ul>
   {% for collection in collections: %}
     <li>
-      {# TODO reverse url #}
       <a class="collection" href="{{ collection.get_url_path() }}">
-        {{ collection.name }}
-      </a>
+        {{ collection.name }}</a>
     </li>
   {% endfor %}
 </ul>

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% from "browse/macros.html" import secondary_categories %}
+
+{% block title %}
+{% if query %}
+  {{ page_title(_('Personas Search Results for {0}')|f(query)) }}
+{% else %}
+  {{ page_title(_('Personas Search Results')) }}
+{% endif %}
+{% endblock title %}
+
+{% block content %}
+<div class="primary" role="main">
+  <header class="results-head">
+    {{ breadcrumbs([(None, _('Search'))]) }}
+    <hgroup>
+      <h2>{{ _('Browse Personas') }}</h2>
+      <h3 class="results-count">{{ showing(query, tag, pager) }}</h3>
+    </hgroup>
+  </header>
+
+  <div class="featured">
+    {% if pager.object_list %}
+      <div class="featured-inner">
+        {{ persona_grid(pager.object_list) }}
+      </div>
+      <div class="listing-footer">{{ pager|paginator }}</div>
+    {% else %}
+      {% include 'search/no_results.html' %}
+    {% endif %}
+  </div>
+</div>
+{{ secondary_categories(_('Personas'), 'browse.personas', categories, filter) }}
+{% endblock %}

@@ -1,13 +1,46 @@
 # -*- coding: utf8 -*-
 """Check all our redirects from remora to zamboni."""
-from django import test
-
 from nose.tools import eq_
+import test_utils
+
+import amo
+from addons.models import Category
+from applications.models import Application
 
 
-class TestRedirects(test.TestCase):
+class TestRedirects(test_utils.TestCase):
+    fixtures = ['base/apps', 'reviews/test_models', 'base/global-stats']
 
-    fixtures = ['amo/test_redirects', 'base/global-stats']
+    def test_persona_category(self):
+        """`/personas/film and tv` should go to /personas/film-and-tv"""
+        r = self.client.get('personas/film and tv', follow=True)
+        assert r.redirect_chain[-1][0].endswith(
+                '/en-US/firefox/personas/film-and-tv')
+
+    def test_top_tags(self):
+        """`/top-tags/?` should 301 to `/tags/top`."""
+        response = self.client.get(u'top-tags/', follow=True)
+        self.assertRedirects(response, '/en-US/firefox/tags/top',
+                             status_code=301)
+
+    def test_persona(self):
+        """`/persona/\d+` should go to `/addon/\d+`."""
+        r = self.client.get(u'persona/4', follow=True)
+        assert r.redirect_chain[-1][0].endswith('/en-US/firefox/addon/4/')
+
+    def test_contribute_installed(self):
+        """`/addon/\d+/about` should go to
+           `/addon/\d+/contribute/installed`."""
+        r = self.client.get(u'addon/5326/about', follow=True)
+        redirect = r.redirect_chain[-1][0]
+        assert redirect.endswith(
+                        '/en-US/firefox/addon/5326/contribute/installed/')
+
+    def test_contribute(self):
+        """`/addons/contribute/$id` should go to `/addon/$id/contribute`."""
+        response = self.client.get(u'addon/5326/contribute', follow=True)
+        redirect = response.redirect_chain[-1][0]
+        assert redirect.endswith('/en-US/firefox/addon/5326/contribute/')
 
     def test_utf8(self):
         """Without proper unicode handling this will fail."""
@@ -19,7 +52,7 @@ class TestRedirects(test.TestCase):
     def test_parameters(self):
         """Bug 554976. Make sure when we redirect, we preserve our query
         strings."""
-        url = u'/users/login?next=/en-US/firefox/users/edit'
+        url = u'/users/login?to=/en-US/firefox/users/edit'
         r = self.client.get(url, follow=True)
         self.assertRedirects(r, '/en-US/firefox' + url, status_code=301)
 
@@ -30,7 +63,7 @@ class TestRedirects(test.TestCase):
 
     def test_browse(self):
         response = self.client.get('/browse/type:3', follow=True)
-        self.assertRedirects(response, '/en-US/firefox/language-tools',
+        self.assertRedirects(response, '/en-US/firefox/language-tools/',
                              status_code=301)
 
         response = self.client.get('/browse/type:2', follow=True)
@@ -105,4 +138,49 @@ class TestRedirects(test.TestCase):
     def test_users(self):
         response = self.client.get('/users/info/1', follow=True)
         self.assertRedirects(response, '/en-US/firefox/user/1/',
+                             status_code=301)
+
+    def test_extension_sorting(self):
+        r = self.client.get('/browse/type:1?sort=updated', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/extensions/?sort=updated',
+                             status_code=301)
+        r = self.client.get('/browse/type:1?sort=name', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/extensions/?sort=name',
+                             status_code=301)
+        r = self.client.get('/browse/type:1?sort=newest', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/extensions/?sort=created',
+                             status_code=301)
+        r = self.client.get('/browse/type:1?sort=weeklydownloads', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/extensions/?sort=popular',
+                             status_code=301)
+        r = self.client.get('/browse/type:1?sort=averagerating', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/extensions/?sort=rating',
+                             status_code=301)
+        # If we don't recognize the sort, they get nothing.
+        r = self.client.get('/browse/type:1?sort=xxx', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/extensions/',
+                             status_code=301)
+
+        a = Application.objects.create()
+        Category.objects.create(pk=12, slug='woo', type=amo.ADDON_EXTENSION,
+                                application=a, count=1, weight=0)
+        r = self.client.get('/browse/type:1/cat:12?sort=averagerating',
+                            follow=True)
+        url, code = r.redirect_chain[-1]
+        eq_(code, 301)
+        assert url.endswith('/en-US/firefox/extensions/woo/?sort=rating')
+
+    def test_addons_versions(self):
+        r = self.client.get('/addons/versions/4', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/addon/4/versions/',
+                             status_code=301)
+
+    def test_addons_versions_rss(self):
+        r = self.client.get('/addons/versions/4/format:rss', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/addon/4/versions/format:rss',
+                             status_code=301)
+
+    def test_addons_reviews_rss(self):
+        r = self.client.get('/addons/reviews/4/format:rss', follow=True)
+        self.assertRedirects(r, '/en-US/firefox/addon/4/reviews/format:rss',
                              status_code=301)

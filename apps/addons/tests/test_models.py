@@ -1,6 +1,6 @@
 from datetime import date
+import itertools
 
-from django import test
 from django.conf import settings
 from django.core.cache import cache
 
@@ -8,37 +8,25 @@ from nose.tools import eq_, assert_not_equal
 import test_utils
 
 import amo
-from addons.models import (Addon, AddonPledge, AddonType, Category, Persona,
-                           Preview)
+from addons.models import (Addon, AddonDependency, AddonPledge,
+                           AddonRecommendation, AddonType, Category, Feature,
+                           Persona, Preview)
+from applications.models import AppVersion
 from reviews.models import Review
 from users.models import UserProfile
-from versions.models import Version
+from versions.models import ApplicationsVersions, Version
 
 
 class TestAddonManager(test_utils.TestCase):
-    fixtures = ['addons/test_manager']
+    fixtures = ['base/addon_5299_gcal', 'addons/test_manager']
 
     def test_featured(self):
         featured = Addon.objects.featured(amo.FIREFOX)[0]
         eq_(featured.id, 1)
         eq_(Addon.objects.featured(amo.FIREFOX).count(), 1)
 
-        # Mess with the Feature's start and end date.
-        feature = featured.feature_set.all()[0]
-        prev_end = feature.end
-        feature.end = feature.start
-        feature.save()
-        eq_(Addon.objects.featured(amo.FIREFOX).count(), 0)
-        feature.end = prev_end
-
-        feature.start = feature.end
-        eq_(Addon.objects.featured(amo.FIREFOX).count(), 0)
-
-        featured = Addon.objects.featured(amo.THUNDERBIRD)[0]
-        eq_(featured.id, 2)
-        eq_(Addon.objects.featured(amo.THUNDERBIRD).count(), 1)
-
     def test_listed(self):
+        Addon.objects.filter(id=5299).update(inactive=True)
         # Should find one addon.
         q = Addon.objects.listed(amo.FIREFOX, amo.STATUS_PUBLIC)
         eq_(len(q.all()), 1)
@@ -81,8 +69,15 @@ class TestAddonManager(test_utils.TestCase):
 
 
 class TestAddonModels(test_utils.TestCase):
-    # base/addons has an example addon
-    fixtures = ['base/addons', 'addons/featured',
+    fixtures = ['base/apps',
+                'base/users',
+                'base/addon_5299_gcal',
+                'base/addon_3615',
+                'base/addon_3723_listed',
+                'base/addon_6704_grapple.json',
+                'base/addon_4594_a9',
+                'base/addon_4664_twitterbar',
+                'addons/featured',
                 'addons/invalid_latest_version']
 
     def test_current_version(self):
@@ -90,24 +85,21 @@ class TestAddonModels(test_utils.TestCase):
         Tests that we get the current (latest public) version of an addon.
         """
         a = Addon.objects.get(pk=3615)
-        eq_(a.current_version.id, 24007)
+        eq_(a.current_version.id, 81551)
 
     def test_current_version_listed(self):
         a = Addon.objects.get(pk=3723)
         eq_(a.current_version.id, 89774)
 
     def test_current_version_listed_no_version(self):
+        Addon.objects.filter(pk=3723).update(_current_version=None)
         Version.objects.filter(addon=3723).delete()
         a = Addon.objects.get(pk=3723)
         eq_(a.current_version, None)
 
     def test_current_beta_version(self):
         a = Addon.objects.get(pk=5299)
-        eq_(a.current_beta_version.id, 78841)
-
-    def test_current_version_unreviewed(self):
-        a = Addon.objects.get(pk=55)
-        eq_(a.current_version.id, 55)
+        eq_(a.current_beta_version.id, 50000)
 
     def test_current_version_mixed_statuses(self):
         """Mixed file statuses are evil (bug 558237)."""
@@ -122,10 +114,25 @@ class TestAddonModels(test_utils.TestCase):
 
         # Wipe caches.
         cache.clear()
-        del a.__dict__['current_version']
+        a.update_current_version()
 
         # Make sure the updated version is now considered current.
         eq_(a.current_version.id, v.id)
+
+    def test_incompatible_latest_apps(self):
+        a = Addon.objects.get(pk=3615)
+        eq_(a.incompatible_latest_apps(), [])
+
+        av = ApplicationsVersions.objects.get(pk=47881)
+        av.max = AppVersion.objects.get(pk=97)  # Firefox 2.0
+        av.save()
+
+        a = Addon.objects.get(pk=3615)
+        eq_(a.incompatible_latest_apps(), [amo.FIREFOX])
+
+        # Check a search engine addon.
+        a = Addon.objects.get(pk=4594)
+        eq_(a.incompatible_latest_apps(), [])
 
     def test_icon_url(self):
         """
@@ -137,10 +144,12 @@ class TestAddonModels(test_utils.TestCase):
         a = Addon.objects.get(pk=3615)
         expected = (settings.ADDON_ICON_URL % (3615, 0)).rstrip('/0')
         assert a.icon_url.startswith(expected)
-        a = Addon.objects.get(pk=7172)
+        a = Addon.objects.get(pk=6704)
+        a.icon_type = None
         assert a.icon_url.endswith('/icons/default-theme.png'), (
                 "No match for %s" % a.icon_url)
-        a = Addon.objects.get(pk=73)
+        a = Addon.objects.get(pk=3615)
+        a.icon_type = None
         assert a.icon_url.endswith('/icons/default-addon.png')
 
     def test_thumbnail_url(self):
@@ -148,9 +157,9 @@ class TestAddonModels(test_utils.TestCase):
         Test for the actual thumbnail URL if it should exist, or the no-preview
         url.
         """
-        a = Addon.objects.get(pk=7172)
-        a.thumbnail_url.index('/previews/thumbs/25/25981.png?modified=')
-        a = Addon.objects.get(pk=73)
+        a = Addon.objects.get(pk=4664)
+        a.thumbnail_url.index('/previews/thumbs/20/20397.png?modified=')
+        a = Addon.objects.get(pk=5299)
         assert a.thumbnail_url.endswith('/icons/no-preview.png'), (
                 "No match for %s" % a.thumbnail_url)
 
@@ -163,6 +172,9 @@ class TestAddonModels(test_utils.TestCase):
         # unreviewed add-on
         a = Addon(status=amo.STATUS_UNREVIEWED)
         assert a.is_unreviewed(), 'sandboxed add-on: is_unreviewed=True'
+
+        a.status = amo.STATUS_PENDING
+        assert a.is_unreviewed(), 'pending add-on: is_unreviewed=True'
 
     def test_is_selfhosted(self):
         """Test if an add-on is listed or hosted"""
@@ -182,16 +194,56 @@ class TestAddonModels(test_utils.TestCase):
 
     def test_is_category_featured(self):
         """Test if an add-on is category featured"""
+        Feature.objects.filter(addon=1001).delete()
         a = Addon.objects.get(pk=1001)
-        assert not a.is_featured(amo.FIREFOX, 'en-US'), (
-            'category featured add-on mistaken for globally featured')
+        assert not a.is_featured(amo.FIREFOX, 'en-US')
 
-        assert a.is_category_featured(amo.FIREFOX, 'en-US'), (
-            'category featured add-on not recognized')
+        assert a.is_category_featured(amo.FIREFOX, 'en-US')
+
+    def test_is_profile_public(self):
+        """Test if an add-on's developer profile is complete (public)."""
+        addon = lambda: Addon.objects.get(pk=3615)
+        assert not addon().is_profile_public()
+
+        a = addon()
+        a.the_reason = 'some reason'
+        a.save()
+        assert not addon().is_profile_public()
+
+        a.the_future = 'some future'
+        a.save()
+        assert addon().is_profile_public()
+
+        a.the_reason = ''
+        a.the_future = ''
+        a.save()
+        assert not addon().is_profile_public()
+
+    def test_has_profile(self):
+        """Test if an add-on's developer profile is (partially or entirely)
+        completed.
+
+        """
+        addon = lambda: Addon.objects.get(pk=3615)
+        assert not addon().has_profile()
+
+        a = addon()
+        a.the_reason = 'some reason'
+        a.save()
+        assert addon().has_profile()
+
+        a.the_future = 'some future'
+        a.save()
+        assert addon().has_profile()
+
+        a.the_reason = ''
+        a.the_future = ''
+        a.save()
+        assert not addon().has_profile()
 
     def test_has_eula(self):
         addon = lambda: Addon.objects.get(pk=3615)
-        assert not addon().has_eula
+        assert addon().has_eula
 
         a = addon()
         a.eula = ''
@@ -208,12 +260,14 @@ class TestAddonModels(test_utils.TestCase):
         original reviews.
         """
         addon = Addon.objects.get(id=3615)
-        u = UserProfile.objects.get(pk=2519)
+        u = UserProfile.objects.get(pk=999)
         version = addon.current_version
-        new_review = Review(version=version, user=u, rating=2, body='hello')
+        new_review = Review(version=version, user=u, rating=2, body='hello',
+                            addon=addon)
         new_review.save()
         new_reply = Review(version=version, user=addon.authors.all()[0],
-                           reply_to=new_review, rating=2, body='my reply')
+                           addon=addon, reply_to=new_review,
+                           rating=2, body='my reply')
         new_reply.save()
 
         review_list = [r.pk for r in addon.reviews]
@@ -229,6 +283,8 @@ class TestCategoryModel(test_utils.TestCase):
     def test_category_url(self):
         """Every type must have a url path for its categories."""
         for t in amo.ADDON_TYPE.keys():
+            if t == amo.ADDON_DICT:
+                continue  # Language packs don't have categories.
             cat = Category(type=AddonType(id=t), slug='omg')
             assert cat.get_url_path()
 
@@ -286,3 +342,40 @@ class TestPreviewModel(test_utils.TestCase):
         expect = ['caption', 'full', 'thumbnail']
         reality = sorted(Preview.objects.all()[0].as_dict().keys())
         eq_(expect, reality)
+
+
+class TestAddonRecommendations(test_utils.TestCase):
+    fixtures = ['base/addon-recs']
+
+    def test_scores(self):
+        ids = [5299, 1843, 2464, 7661, 5369]
+        scores = AddonRecommendation.scores(ids)
+        q = AddonRecommendation.objects.filter(addon__in=ids)
+        for addon, recs in itertools.groupby(q, lambda x: x.addon_id):
+            for rec in recs:
+                eq_(scores[addon][rec.other_addon_id], rec.score)
+
+
+class TestAddonDependencies(test_utils.TestCase):
+    fixtures = ['base/addon_5299_gcal',
+                'base/addon_3615',
+                'base/addon_3723_listed',
+                'base/addon_6704_grapple',
+                'base/addon_4664_twitterbar']
+
+    def test_dependencies(self):
+        ids = [3615, 3723, 4664, 6704]
+        a = Addon.objects.get(id=5299)
+
+        for dependent_id in ids:
+            AddonDependency(addon=a,
+                dependent_addon=Addon.objects.get(id=dependent_id)).save()
+
+        eq_(sorted([a.id for a in a.dependencies.all()]), sorted(ids))
+
+
+class TestListedAddonTwoVersions(test_utils.TestCase):
+    fixtures = ['addons/listed-two-versions']
+
+    def test_listed_two_versions(self):
+        Addon.objects.get(id=2795)  # bug 563967

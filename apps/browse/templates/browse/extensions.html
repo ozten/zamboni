@@ -3,16 +3,17 @@
 {% block content %}
 <header>
   {% if category %}
-    {{ breadcrumbs([(url('browse.extensions'), _('Extensions'))]) }}
+    {{ breadcrumbs([(url('browse.extensions'), _('Extensions')), (None, category.name)]) }}
     <hgroup>
     <h2>{{ category.name }}</h2>
   {% else %}
-    {{ breadcrumbs() }}
+    {{ breadcrumbs([(None, _('Extensions'))]) }}
     <hgroup>
     <h2>{{ _('Extensions') }}</h2>
   {% endif %}
   {# L10n: {0} is an integer. #}
-  <h3>{{ _('<b>{0}</b> add-ons')|f(addons.paginator.count)|safe }}</h3>
+  <h3>{{ ngettext('<b>{0}</b> add-on', '<b>{0}</b> add-ons', addons.paginator.count)|f(
+            addons.paginator.count|numberfmt)|safe }}</h3>
   </hgroup>
 </header>
 
@@ -25,7 +26,7 @@
     {% endif %}
     {{ addon_listing_header(url_base, sort_opts, sorting, unreviewed) }}
     {{ addon_listing_items(addons.object_list, src='category',
-                           show_added_date=(sorting=='created')) }}
+                           show_date=sorting) }}
     <div class="listing-footer">
       {{ addons|paginator }}
     </div>

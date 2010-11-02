@@ -7,11 +7,27 @@ from addons.models import Addon, AppSupport
 from files.models import File
 
 
+class CurrentVersionTestCase(test_utils.TestCase):
+    fixtures = ['base/addon_3615']
+
+    def test_addons(self):
+        Addon.objects.filter(pk=3615).update(_current_version=None)
+        eq_(Addon.objects.filter(_current_version=None, pk=3615).count(), 1)
+        cron._update_addons_current_version(((3615,),))
+        eq_(Addon.objects.filter(_current_version=None, pk=3615).count(), 0)
+
+    def test_cron(self):
+        Addon.objects.filter(pk=3615).update(_current_version=None)
+        eq_(Addon.objects.filter(_current_version=None, pk=3615).count(), 1)
+        cron.update_addons_current_version()
+        eq_(Addon.objects.filter(_current_version=None, pk=3615).count(), 0)
+
+
 class TestLastUpdated(test_utils.TestCase):
-    fixtures = ['base/addons']
+    fixtures = ['base/addon_3615', 'addons/listed']
 
     def test_personas(self):
-        Addon.objects.update(type=amo.ADDON_PERSONA)
+        Addon.objects.update(type=amo.ADDON_PERSONA, status=amo.STATUS_PUBLIC)
 
         cron.addon_last_updated()
         for addon in Addon.objects.all():
@@ -44,8 +60,14 @@ class TestLastUpdated(test_utils.TestCase):
         ids = Addon.objects.values_list('id', flat=True)
         cron._update_appsupport(ids)
 
-        eq_(AppSupport.objects.count(), 11)
+        eq_(AppSupport.objects.count(), 2)
 
         # Run it again to test deletes.
         cron._update_appsupport(ids)
-        eq_(AppSupport.objects.count(), 11)
+        eq_(AppSupport.objects.count(), 2)
+
+    def test_appsupport_listed(self):
+        AppSupport.objects.all().delete()
+        eq_(AppSupport.objects.filter(addon=3723).count(), 0)
+        cron.update_addon_appsupport()
+        eq_(AppSupport.objects.filter(addon=3723, app=1).count(), 1)

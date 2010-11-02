@@ -4,11 +4,18 @@ import urllib
 from urlparse import urlparse, urlsplit, urlunsplit
 
 from django.conf import settings
-from django.core.urlresolvers import reverse as django_reverse
+from django.core import urlresolvers
+from django.utils import encoding
 from django.utils.thread_support import currentThread
 from django.utils.translation.trans_real import parse_accept_lang_header
 
+import jinja2
+
 import amo.models
+
+# Get a pointer to Django's reverse because we're going to hijack it after we
+# define our own.
+django_reverse = urlresolvers.reverse
 
 
 # Thread-local storage for URL prefixes.  Access with {get,set}_url_prefix.
@@ -40,18 +47,22 @@ def get_app_redirect(app):
     prefixer.app = old_app
     return new_url
 
+
 def reverse(viewname, urlconf=None, args=None, kwargs=None, prefix=None,
-            current_app=None):
+            current_app=None, add_prefix=True):
     """Wraps django's reverse to prepend the correct locale and app."""
     prefixer = get_url_prefix()
     # Blank out the script prefix since we add that in prefixer.fix().
     if prefixer:
         prefix = prefix or '/'
     url = django_reverse(viewname, urlconf, args, kwargs, prefix, current_app)
-    if prefixer:
+    if prefixer and add_prefix:
         return prefixer.fix(url)
     else:
         return url
+
+# Replace Django's reverse with our own.
+urlresolvers.reverse = reverse
 
 
 class Prefixer(object):
@@ -85,6 +96,19 @@ class Prefixer(object):
                 return '', second, rest
             else:
                 return '', '', path
+
+    def get_app(self):
+        """
+        Return a valid application string using the User Agent to guess.  Falls
+        back to settings.DEFAULT_APP.
+        """
+        ua = self.request.META.get('HTTP_USER_AGENT')
+        if ua:
+            for app in amo.APP_DETECT:
+                if app.user_agent_string in ua:
+                    return app.short
+
+        return settings.DEFAULT_APP
 
     def get_language(self):
         """
@@ -128,7 +152,7 @@ class Prefixer(object):
             url_parts.append(locale)
 
         if path.partition('/')[0] not in settings.SUPPORTED_NONAPPS:
-            app = self.app if self.app else settings.DEFAULT_APP
+            app = self.app if self.app else self.get_app()
             url_parts.append(app)
 
         url_parts.append(path)
@@ -147,9 +171,12 @@ def get_outgoing_url(url):
     if urlparse(url).netloc == urlparse(settings.REDIRECT_URL).netloc:
         return url
 
+    url = encoding.smart_str(jinja2.utils.Markup(url).unescape())
     hash = hashlib.sha1(settings.REDIRECT_SECRET_KEY + url).hexdigest()
-    return '/'.join(
-        [settings.REDIRECT_URL.rstrip('/'), hash, urllib.quote(url)])
+    # Let '&=' through so query params aren't escaped.  We probably shouldn't
+    # bother to quote the query part at all.
+    return '/'.join([settings.REDIRECT_URL.rstrip('/'), hash,
+                     urllib.quote(url, safe='/&=')])
 
 
 def url_fix(s, charset='utf-8'):
@@ -169,6 +196,6 @@ def url_fix(s, charset='utf-8'):
     if isinstance(s, unicode):
         s = s.encode(charset, 'ignore')
     scheme, netloc, path, qs, anchor = urlsplit(s)
-    path = urllib.quote(path, '/%')
+    path = urllib.quote(path, '/%:')
     qs = urllib.quote_plus(qs, ':&=')
     return urlunsplit((scheme, netloc, path, qs, anchor))

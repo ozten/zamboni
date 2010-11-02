@@ -1,12 +1,29 @@
 {% extends "base.html" %}
 
-{% block title %}{{ page_title(title) }}{% endblock %}
+{% block title %}
+{% if query %}
+  {{ page_title(_('Add-on Search Results for {0}')|f(query)) }}
+{% else %}
+  {{ page_title(_('Add-on Search Results')) }}
+{% endif %}
+{% endblock %}
+
+{% block extrahead %}
+<meta name="WT.oss" content="{{ query }}">
+<meta name="WT.oss_r" content="{{ pager.paginator.count }}">
+{% endblock %}
 
 {% block content %}
 <section class="primary" role="main">
   <header class="results-head">
+    {{ breadcrumbs([(None, _('Search'))]) }}
     <h2>{{ _('Search Results') }}</h2>
     <h3 class="results-count">{{ showing(query, tag, pager) }}</h3>
+    {% if sort == 'name' %}
+    {# L10n: {0} is the name of the current locale. #}
+    <p><em>{{ _('Sorting by name includes only {0}
+      results.')|f(settings.LANGUAGES.get(LANG.lower())) }}</em></p>
+    {% endif %}
   </header>
 
   <div class="listing results">
@@ -19,21 +36,14 @@
           {% endfor %}
         </ul>
       </div>
-      {{ addon_listing_items(pager.object_list, show_added_date=(sort == 'newest'),
-                             src='search') }}
+      {{ addon_listing_items(pager.object_list, show_date=sort, src='search') }}
     </div>
 
     <div class="listing-footer">
-    {{ pager|paginator}}
+    {{ pager|paginator }}
     </div>
   {% else %}
-  <div class="featured-inner">
-    <div class="listing-header">
-      <p class="no-results">
-        {{ _('No results found.') }}
-      </p>
-    </div>
-  </div>
+  {% include 'search/no_results.html' %}
   {% endif %}
 
   </div>
@@ -64,7 +74,7 @@
         {% endfor %}
       </ul>
     </div>
-
+    {% if tags %}
     <div id="refine-tags">
       <h5>{{ _('Tags') }}</h5>
 
@@ -74,6 +84,7 @@
         {% endfor %}
       </ul>
     </div>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

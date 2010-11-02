@@ -2,39 +2,29 @@
 {% from 'includes/forms.html' import required %}
 
 {% block title %}{{ page_title(_('New User Registration')) }}{% endblock %}
-
+{% block js %}
+<script type="text/javascript" src="{{ settings.RECAPTCHA_URL }}"></script>
+{% endblock %}
 {% block content %}
 
 <div class="primary" role="main">
   <h2>{{ _('Register') }}</h2>
   <div class="primary featured">
-    {% if messages %}
-      {% for message in messages %}
-        <div class="notification-box {{ message.tags }}">
-          <h2>{{ message }}</h2>
-        </div>
-      {% endfor %}
-    {% endif %}
-
+    {% include "messages.html" %}
     {% if form %}
       <form method="post" action="" class="featured-inner object-lead user-input">
         {{ csrf() }}
         <fieldset>
           <ul>
             <li>
-              <label for="id_firstname">{{ _('First name') }} {{ required() }}</label>
-              {{ form.firstname|safe }}
-              {{ form.firstname.errors|safe }}
+              <label for="id_username">{{ _('Username') }} {{ required() }}</label>
+              {{ form.username|safe }}
+              {{ form.username.errors|safe }}
             </li>
             <li>
-              <label for="id_lastname">{{ _('Last name') }}</label>
-              {{ form.lastname|safe }}
-              {{ form.lastname.errors|safe }}
-            </li>
-            <li>
-              <label for="id_nickname">{{ _('Nickname') }} {{ required() }}</label>
-              {{ form.nickname|safe }}
-              {{ form.nickname.errors|safe }}
+              <label for="id_display_name">{{ _('Display name') }}</label>
+              {{ form.display_name|safe }}
+              {{ form.display_name.errors|safe }}
             </li>
             <li>
               <label for="id_homepage">{{ _('Homepage') }}</label>
@@ -62,6 +52,36 @@
               <label for="id_password2">{{ _('Confirm password') }} {{ required() }}</label>
               {{ form.password2|safe }}
               {{ form.password2.errors|safe }}
+            </li>
+            <li>
+            {% if settings.RECAPTCHA_PRIVATE_KEY %}
+            <label for="recaptcha_response_field">
+              {{ _('Are you human?') }} {{ required() }}
+            </label>
+            {% trans %}
+              <p>
+                Please enter <strong>both words</strong> below,
+                <strong>separated by a space</strong>.
+              </p>
+              <p>
+                If this is hard to read, you can
+                <a href="#" id="recaptcha_different">try different words</a> or
+                <a href="#" id="recaptcha_audio">listen to something</a> instead.
+              </p>
+            {% endtrans %}
+            <div id="recaptcha_image"></div>
+            <p>
+              <input type="text" name="recaptcha_response_field"
+                     id="recaptcha_response_field" size="30" />
+            </p>
+            <p><a href="#" id="recaptcha_help">{{ _("What's this?") }}</a></p>
+            {{ form.recaptcha.errors|safe }}
+            {% else %}
+            <p>
+              Welcome Robots, ReCaptcha has been disabled for your convenience.
+              Spam at Wil.
+            </p>
+            {% endif %}
             </li>
           </ul>
         </fieldset>
@@ -91,6 +111,7 @@
           <a href="{{ privacy }}" title="Privacy Policy">Privacy Policy</a>.</p>
       {% endtrans %}
     </div>
+</div>{# .secondary #}
 </div>{# .primary #}
 
 {% endblock content %}

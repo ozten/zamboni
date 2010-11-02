@@ -2,32 +2,40 @@ from jingo import register, env
 import jinja2
 
 import sharing
-from .models import ServiceBase, EMAIL
+from amo.helpers import login_link
 
 
-@register.inclusion_tag('sharing/addon_sharing.html')
+@register.inclusion_tag('sharing/sharing_widget.html')
 @jinja2.contextfunction
-def addon_sharing(context, addon):
-    # prepare services
-    opts = {}
-    for service in sharing.SERVICES_LIST:
-        service_opts = {}
-        if service == EMAIL and not context['request'].user.is_authenticated():
-            service_opts['url'] = '/users/login' # TODO reverse URL
-            service_opts['target'] = '_self'
-        else:
-            service_opts['url'] = '/addon/share/{id}?service={name}'.format(
-                id=addon.id, name=service.shortname)
-            service_opts['target'] = '_blank'
-        opts[service] = service_opts
+def sharing_widget(context, obj, condensed=False):
+    c = dict(context.items())
+
+    services = list(sharing.SERVICES_LIST)
+
+    counts = {}
+    for service in services:
+        short = service.shortname
+        counts[short] = service.count_term(obj.share_counts[short])
+
+    c.update({
+        'condensed': condensed,
+        'base_url': obj.share_url(),
+        'counts': counts,
+        'services': services,
+        'obj': obj,
+    })
+    return c
+
+
+@register.inclusion_tag('sharing/sharing_box.html')
+@jinja2.contextfunction
+def sharing_box(context):
+    request = context['request']
 
     c = dict(context.items())
     c.update({
-        'request': context['request'],
-        'user': context['request'].user,
-        'addon': addon,
+        'request': request,
+        'user': request.user,
         'services': sharing.SERVICES_LIST,
-        'service_opts': opts,
-        'email_service': EMAIL,
     })
     return c

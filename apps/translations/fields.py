@@ -10,15 +10,22 @@ from .widgets import TranslationWidget
 
 
 class TranslatedField(models.ForeignKey):
-    """A foreign key to the translations table."""
-    model = Translation
+    """
+    A foreign key to the translations table.
+
+    If require_locale=False, the fallback join will not use a locale.  Instead,
+    we will look for 1) a translation in the current locale and 2) fallback
+    with any translation matching the foreign key.
+    """
+    to = Translation
 
     def __init__(self, **kwargs):
         # to_field: The field on the related object that the relation is to.
         # Django wants to default to translations.autoid, but we need id.
         options = dict(null=True, to_field='id', unique=True, blank=True)
         kwargs.update(options)
-        super(TranslatedField, self).__init__(self.model, **kwargs)
+        self.require_locale = kwargs.pop('require_locale', True)
+        super(TranslatedField, self).__init__(self.to, **kwargs)
 
     @property
     def db_column(self):
@@ -43,8 +50,8 @@ class TranslatedField(models.ForeignKey):
         else:
             cls._meta.translated_fields = [self]
 
-        # Set up a unique related name.
-        self.rel.related_name = '%s_%s_set' % (cls.__name__, name)
+        # Set up a unique related name.  The + means it's hidden.
+        self.rel.related_name = '%s_%s_set+' % (cls.__name__, name)
 
         # Replace the normal descriptor with our custom descriptor.
         setattr(cls, self.name, TranslationDescriptor(self))
@@ -61,17 +68,27 @@ class TranslatedField(models.ForeignKey):
 
 
 class PurifiedField(TranslatedField):
-    model = PurifiedTranslation
+    to = PurifiedTranslation
 
 
 class LinkifiedField(TranslatedField):
-    model = LinkifiedTranslation
+    to = LinkifiedTranslation
 
 
 def switch(obj, new_model):
     """Switch between Translation and Purified/Linkified Translations."""
     fields = [(f.name, getattr(obj, f.name)) for f in new_model._meta.fields]
     return new_model(**dict(fields))
+
+
+def save_on_signal(obj, trans):
+    """Connect signals so the translation gets saved during obj.save()."""
+    signal = models.signals.pre_save
+    def cb(sender, instance, **kw):
+        if instance is obj:
+            trans.save(force_update=True)
+            signal.disconnect(cb)
+    signal.connect(cb, sender=obj.__class__, weak=False)
 
 
 class TranslationDescriptor(related.ReverseSingleRelatedObjectDescriptor):
@@ -81,7 +98,7 @@ class TranslationDescriptor(related.ReverseSingleRelatedObjectDescriptor):
 
     def __init__(self, field):
         super(TranslationDescriptor, self).__init__(field)
-        self.model = field.model
+        self.model = field.rel.to
 
     def __get__(self, instance, instance_type=None):
         if instance is None:
@@ -90,7 +107,7 @@ class TranslationDescriptor(related.ReverseSingleRelatedObjectDescriptor):
         # If Django doesn't find find the value in the cache (which would only
         # happen if the field was set or accessed already), it does a db query
         # to follow the foreign key.  We expect translations to be set by
-        # TranslatedFieldMixin, so doing a query is the wrong thing here.
+        # queryset transforms, so doing a query is the wrong thing here.
         try:
             return getattr(instance, self.field.get_cache_name())
         except AttributeError:
@@ -102,7 +119,6 @@ class TranslationDescriptor(related.ReverseSingleRelatedObjectDescriptor):
             value = self.translation_from_string(instance, lang, value)
         elif hasattr(value, 'items'):
             value = self.translation_from_dict(instance, lang, value)
-
 
         # Don't let this be set to None, because Django will then blank out the
         # foreign key for this object.  That's incorrect for translations.
@@ -122,18 +138,19 @@ class TranslationDescriptor(related.ReverseSingleRelatedObjectDescriptor):
             if trans is None and trans_id is not None:
                 # This locale doesn't have a translation set, but there are
                 # translations in another locale, so we have an id already.
-                return self.model.new(string, lang, id=trans_id)
+                translation = self.model.new(string, lang, id=trans_id)
             elif to_language(trans.locale) == lang.lower():
                 # Replace the translation in the current language.
                 trans.localized_string = string
-                trans.save()
-                return trans
+                translation = trans
             else:
                 # We already have a translation in a different language.
-                return self.model.new(string, lang, id=trans.id)
+                translation = self.model.new(string, lang, id=trans.id)
         except AttributeError:
             # Create a brand new translation.
-            return self.model.new(string, lang)
+            translation = self.model.new(string, lang)
+        save_on_signal(instance, translation)
+        return translation
 
     def translation_from_dict(self, instance, lang, dict_):
         """
@@ -143,6 +160,8 @@ class TranslationDescriptor(related.ReverseSingleRelatedObjectDescriptor):
         """
         rv = None
         for locale, string in dict_.items():
+            if locale.lower() not in settings.LANGUAGES:
+                continue
             # The Translation is created and saved in here.
             trans = self.translation_from_string(instance, locale, string)
 
@@ -157,69 +176,13 @@ class TranslationDescriptor(related.ReverseSingleRelatedObjectDescriptor):
         return rv
 
 
-class TranslatedFieldMixin(object):
-    """Mixin that fetches all ``TranslatedFields`` after instantiation."""
-
-    def __init__(self, *args, **kw):
-        super(TranslatedFieldMixin, self).__init__(*args, **kw)
-        self._set_translated_fields()
-
-    def _set_translated_fields(self):
-        """Fetch and attach all of this object's translations."""
-        if hasattr(self._meta, 'translated_fields'):
-            fields = self._meta.translated_fields
-        else:
-            fields = [f for f in self._meta.fields
-                      if isinstance(f, TranslatedField)]
-            self._meta.translated_fields = fields
-
-        # Map the attribute name to the object name: 'name_id' => 'name'
-        names = dict((f.attname, f.name) for f in fields)
-        # Map the foreign key to the attribute name: self.name_id => 'name_id'
-        ids = dict((getattr(self, name), name) for name in names)
-
-        lang = translation_utils.get_language()
-        q = self.fetch_translations(filter(None, ids), lang)
-
-        for translation in q:
-            attr = names.pop(ids[translation.id])
-            setattr(self, attr, translation)
-
-    def fetch_translations(self, ids, lang):
-        """
-        Performs the query for finding Translation objects.
-
-        - ``ids`` is a list of the foreign keys to the object's translations
-        - ``lang`` is the language of the current request
-
-        Override this to search for translations in an unusual way.
-        """
-        return translations_with_fallback(ids, lang, settings.LANGUAGE_CODE)
-
-
-def translations_with_fallback(ids, lang, default):
-    """Default implementation for TranslatedFieldMixin.fetch_translations."""
-    if not ids:
-        return []
-
-    fetched = Translation.objects.filter(id__in=ids, locale=lang,
-                                         localized_string__isnull=False)
-
-    # Try to find any missing translations in the default locale.
-    missing = set(ids).difference(t.id for t in fetched)
-    if missing and default != lang:
-        fallback = Translation.objects.filter(id__in=missing, locale=default)
-        return list(fetched) + list(fallback)
-    else:
-        return fetched
-
-
 class TranslationFormField(forms.Field):
     widget = TranslationWidget
 
     def __init__(self, *args, **kwargs):
-        del kwargs['queryset']
-        del kwargs['to_field_name']
+        for k in ('queryset', 'to_field_name'):
+            if k in kwargs:
+                del kwargs[k]
         super(TranslationFormField, self).__init__(*args, **kwargs)
 
     def clean(self, value):

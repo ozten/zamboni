@@ -2,14 +2,15 @@ from django.core.management import call_command
 from django.core.cache import cache
 
 from nose.tools import eq_
+import test_utils
 
 from amo.urlresolvers import reverse
-import test_utils
 from applications.models import Application
 
 
 class TestViews(test_utils.TestCase):
-    fixtures = ['base/addons', 'nick/test_views']
+    fixtures = ('base/users', 'base/addon_3615', 'base/addon_59',
+                'nick/test_views',)
 
     def setUp(self):
         assert self.client.login(username='admin@mozilla.com',

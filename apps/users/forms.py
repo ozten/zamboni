@@ -1,13 +1,22 @@
-import logging
+import os
+from smtplib import SMTPException
+
 from django import forms
+from django.conf import settings
 from django.contrib.auth import forms as auth_forms
 from django.forms.util import ErrorList
 
-from tower import ugettext as _
+import captcha.fields
+import commonware.log
+import happyforms
+from tower import ugettext as _, ugettext_lazy as _lazy
 
-from . import models
+from amo.utils import slug_validator
+from .models import (UserProfile, BlacklistedUsername, BlacklistedEmailDomain,
+                     DjangoUser)
+from . import tasks
 
-log = logging.getLogger('z.users')
+log = commonware.log.getLogger('z.users')
 
 
 class AuthenticationForm(auth_forms.AuthenticationForm):
@@ -15,18 +24,36 @@ class AuthenticationForm(auth_forms.AuthenticationForm):
 
 
 class PasswordResetForm(auth_forms.PasswordResetForm):
+
+    def clean_email(self):
+        email = self.cleaned_data['email']
+        self.users_cache = UserProfile.objects.filter(email__iexact=email)
+        if not self.users_cache:
+            raise forms.ValidationError(
+                _("""An email has been sent to the requested account with
+                  further information. If you do not receive an email then
+                  please confirm you have entered the same email address used
+                  during account registration."""))
+        return email
+
     def save(self, **kw):
         for user in self.users_cache:
             log.info(u'Password reset email sent for user (%s)' % user)
-        super(PasswordResetForm, self).save(**kw)
+        try:
+            # Django calls send_mail() directly and has no option to pass
+            # in fail_silently, so we have to catch the SMTP error ourselves
+            super(PasswordResetForm, self).save(**kw)
+        except SMTPException, e:
+            log.error("Failed to send mail for (%s): %s" % (user, e))
 
 
 class SetPasswordForm(auth_forms.SetPasswordForm):
-    def __init__(self, user, *args, **kwargs):
-        super(SetPasswordForm, self).__init__(user, *args, **kwargs)
-        if self.user:
-            # We store our password in the users table, not auth_user like
-            # Django expects
+
+    def __init__(self, *args, **kwargs):
+        super(SetPasswordForm, self).__init__(*args, **kwargs)
+        # We store our password in the users table, not auth_user like
+        # Django expects.
+        if isinstance(self.user, DjangoUser):
             self.user = self.user.get_profile()
 
     def save(self, **kw):
@@ -58,29 +85,44 @@ class UserDeleteForm(forms.Form):
                                                           % self.request.user)
             raise forms.ValidationError("")
 
-    def save(self, **kw):
-        log.info(u'User (%s) has successfully deleted their account.'
-                                                        % self.request.user)
-        super(UserDeleteForm, self).save(**kw)
 
-
-class UserRegisterForm(forms.ModelForm):
-    """For registering users.  We're not building off
+class UserRegisterForm(happyforms.ModelForm):
+    """
+    For registering users.  We're not building off
     d.contrib.auth.forms.UserCreationForm because it doesn't do a lot of the
-    details here, so we'd have to rewrite most of it anyway."""
-    password = forms.CharField(max_length=255, required=False,
-                            widget=forms.PasswordInput(render_value=False))
-    password2 = forms.CharField(max_length=255, required=False,
-                            widget=forms.PasswordInput(render_value=False))
+    details here, so we'd have to rewrite most of it anyway.
+    """
+
+    password = forms.CharField(max_length=255,
+                               widget=forms.PasswordInput(render_value=False))
+
+    password2 = forms.CharField(max_length=255,
+                                widget=forms.PasswordInput(render_value=False))
+    recaptcha = captcha.fields.ReCaptchaField()
 
     class Meta:
-        model = models.UserProfile
+        model = UserProfile
 
-    def clean_nickname(self):
-        """We're breaking the rules and allowing null=True and blank=True on a
-        CharField because I want to enforce uniqueness in the db.  In order to
-        let save() work, I override '' here."""
-        return self.cleaned_data['nickname'] or None
+    def __init__(self, *args, **kwargs):
+        super(UserRegisterForm, self).__init__(*args, **kwargs)
+
+        if not settings.RECAPTCHA_PRIVATE_KEY:
+            del self.fields['recaptcha']
+
+    def clean_email(self):
+        d = self.cleaned_data['email'].split('@')[-1]
+        if BlacklistedEmailDomain.blocked(d):
+            raise forms.ValidationError(_('Please use an email address from a '
+                                          'different provider to complete '
+                                          'your registration.'))
+        return self.cleaned_data['email']
+
+    def clean_username(self):
+        name = self.cleaned_data['username']
+        slug_validator(name, lower=False)
+        if BlacklistedUsername.blocked(name):
+            raise forms.ValidationError(_('This username is invalid.'))
+        return name
 
     def clean(self):
         super(UserRegisterForm, self).clean()
@@ -88,26 +130,14 @@ class UserRegisterForm(forms.ModelForm):
         data = self.cleaned_data
 
         # Passwords
-        p1 = data.get("password")
-        p2 = data.get("password2")
+        p1 = data.get('password')
+        p2 = data.get('password2')
 
         if p1 != p2:
-            msg = _("The passwords did not match.")
-            self._errors["password2"] = ErrorList([msg])
-            del data["password2"]
-
-        # Names
-        if not ("nickname" in self._errors or
-                "firstname" in self._errors or
-                "lastname" in self._errors):
-            fname = data.get("firstname")
-            lname = data.get("lastname")
-            nname = data.get("nickname")
-            if not (fname or lname or nname):
-                msg = _("A first name, last name or nickname is required.")
-                self._errors["firstname"] = ErrorList([msg])
-                self._errors["lastname"] = ErrorList([msg])
-                self._errors["nickname"] = ErrorList([msg])
+            msg = _('The passwords did not match.')
+            self._errors['password2'] = ErrorList([msg])
+            if p2:
+                del data['password2']
 
         return data
 
@@ -115,14 +145,25 @@ class UserRegisterForm(forms.ModelForm):
 class UserEditForm(UserRegisterForm):
     oldpassword = forms.CharField(max_length=255, required=False,
                             widget=forms.PasswordInput(render_value=False))
+    password = forms.CharField(max_length=255, required=False,
+                               widget=forms.PasswordInput(render_value=False))
+
+    password2 = forms.CharField(max_length=255, required=False,
+                                widget=forms.PasswordInput(render_value=False))
+
+    photo = forms.FileField(label=_lazy('Profile Photo'), required=False)
 
     def __init__(self, *args, **kwargs):
         self.request = kwargs.pop('request', None)
         super(UserEditForm, self).__init__(*args, **kwargs)
 
+        # TODO: We should inherit from a base form not UserRegisterForm
+        if self.fields.get('recaptcha'):
+            del self.fields['recaptcha']
+
     class Meta:
-        model = models.UserProfile
-        exclude = ['password']
+        model = UserProfile
+        exclude = ('password', 'picture_type')
 
     def clean(self):
 
@@ -142,15 +183,86 @@ class UserEditForm(UserRegisterForm):
         super(UserEditForm, self).clean()
         return data
 
+    def clean_photo(self):
+        photo = self.cleaned_data['photo']
+
+        if not photo:
+            return
+
+        if photo.content_type not in ('image/png', 'image/jpeg'):
+            raise forms.ValidationError(
+                    _('Images must be either PNG or JPG.'))
+
+        if photo.size > settings.MAX_PHOTO_UPLOAD_SIZE:
+            raise forms.ValidationError(
+                    _('Please use images smaller than %dMB.' %
+                      (settings.MAX_PHOTO_UPLOAD_SIZE / 1024 / 1024 - 1)))
+
+        return photo
+
     def save(self):
-        super(UserEditForm, self).save()
+        u = super(UserEditForm, self).save(commit=False)
         data = self.cleaned_data
-        amouser = self.request.user.get_profile()
+        photo = data['photo']
+        if photo:
+            u.picture_type = 'image/png'
+            tmp_destination = u.picture_path + '__unconverted'
+
+            if not os.path.exists(u.picture_dir):
+                os.makedirs(u.picture_dir)
+
+            fh = open(tmp_destination, 'w')
+            for chunk in photo.chunks():
+                fh.write(chunk)
+
+            fh.close()
+            tasks.resize_photo.delay(tmp_destination, u.picture_path)
 
         if data['password']:
-            amouser.set_password(data['password'])
-            log.info(u'User (%s) changed their password' % amouser)
+            u.set_password(data['password'])
+            log.info(u'User (%s) changed their password' % u)
 
-        log.debug(u'User (%s) updated their profile' % amouser)
+        log.debug(u'User (%s) updated their profile' % u)
 
-        amouser.save()
+        u.save()
+        return u
+
+
+class BlacklistedUsernameAddForm(forms.Form):
+    """Form for adding blacklisted username in bulk fashion."""
+    usernames = forms.CharField(widget=forms.Textarea(
+        attrs={'cols': 40, 'rows': 16}))
+
+    def clean(self):
+        super(BlacklistedUsernameAddForm, self).clean()
+        data = self.cleaned_data
+
+        if 'usernames' in data:
+            data['usernames'] = os.linesep.join(
+                    [s.strip() for s in data['usernames'].splitlines()
+                        if s.strip()])
+        if 'usernames' not in data or data['usernames'] == '':
+            msg = 'Please enter at least one username to blacklist.'
+            self._errors['usernames'] = ErrorList([msg])
+
+        return data
+
+
+class BlacklistedEmailDomainAddForm(forms.Form):
+    """Form for adding blacklisted user e-mail domains in bulk fashion."""
+    domains = forms.CharField(
+            widget=forms.Textarea(attrs={'cols': 40, 'rows': 16}))
+
+    def clean(self):
+        super(BlacklistedEmailDomainAddForm, self).clean()
+        data = self.cleaned_data
+
+        if 'domains' in data:
+            l = filter(None, [s.strip() for s in data['domains'].splitlines()])
+            data['domains'] = os.linesep.join(l)
+
+        if not data.get('domains', ''):
+            msg = 'Please enter at least one e-mail domain to blacklist.'
+            self._errors['domains'] = ErrorList([msg])
+
+        return data

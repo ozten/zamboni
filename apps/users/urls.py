@@ -4,9 +4,13 @@ from django.conf.urls.defaults import patterns, url, include
 from zadmin import jinja_for_django
 
 from . import forms, views
+from .models import UserProfile
 
 # So we can use the contrib logic for password resets, etc.
 auth_views.render_to_response = jinja_for_django
+
+# We need Django to use our User model.
+auth_views.User = UserProfile
 
 
 # These will all start with /user/<user_id>/
@@ -19,7 +23,9 @@ detail_patterns = patterns('',
 )
 
 users_patterns = patterns('',
+    url('^ajax$', views.ajax, name='users.ajax'),
     url('^delete$', views.delete, name='users.delete'),
+    url('^delete_photo$', views.delete_photo, name='users.delete_photo'),
     url('^edit$', views.edit, name='users.edit'),
     url('^login', views.login, name='users.login'),
     url('^logout', views.logout, name='users.logout'),
